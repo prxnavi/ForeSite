@@ -76,6 +76,7 @@ namespace Atlas.EditorTools
                     "OculusTouchControllerProfile",
                     "MetaQuestTouchPlusControllerProfile",
                     "HandInteractionProfile",
+                    "OpenXRCompositionLayersFeature", // Meta passthrough is a composition layer
                 };
                 foreach (var f in settings.GetFeatures())
                 {
@@ -172,18 +173,28 @@ namespace Atlas.EditorTools
         [MenuItem("Atlas/Quest Setup/Build APK Only")]
         public static string BuildOnly() => Build(false);
 
-        static string Build(bool run)
+        [MenuItem("Cascade/Build and Run on Quest")]
+        public static string CascadeBuildAndRun() => Build(true, "Assets/Scenes/CascadeQuest.unity", "Builds/Cascade.apk", "Cascade", "com.prxnavi.cascade");
+
+        [MenuItem("Cascade/Build APK Only")]
+        public static string CascadeBuildOnly() => Build(false, "Assets/Scenes/CascadeQuest.unity", "Builds/Cascade.apk", "Cascade", "com.prxnavi.cascade");
+
+        static string Build(bool run) => Build(run, QuestScene, "Builds/Atlas.apk", "Atlas", "com.prxnavi.atlas");
+
+        static string Build(bool run, string scene, string apk, string product, string appId)
         {
             Directory.CreateDirectory("Builds");
+            PlayerSettings.productName = product;
+            PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android, appId);
             var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
             {
-                scenes = new[] { QuestScene },
-                locationPathName = "Builds/Atlas.apk",
+                scenes = new[] { scene },
+                locationPathName = apk,
                 target = BuildTarget.Android,
                 options = run ? BuildOptions.AutoRunPlayer : BuildOptions.None,
             });
             var s = report.summary;
-            var msg = $"Build {s.result}: {s.totalErrors} errors, {s.totalSize / (1024 * 1024)} MB, {s.totalTime:mm\\:ss}. Output: Builds/Atlas.apk";
+            var msg = $"Build {s.result}: {s.totalErrors} errors, {s.totalSize / (1024 * 1024)} MB, {s.totalTime:mm\\:ss}. Output: {apk}";
             Debug.Log("[Atlas] " + msg);
             return msg;
         }

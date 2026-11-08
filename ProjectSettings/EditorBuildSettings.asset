@@ -12,5 +12,6 @@ EditorBuildSettings:
     path: Assets/Scenes/Atlas.unity
     guid: 1704fe116a31a43b5afa8518756fec57
   m_configObjects:
+    com.unity.xr.arfoundation.simulation_settings: {fileID: 11400000, guid: cb8eaaf5c153e49b6850a3f5fb217e85, type: 2}
     com.unity.xr.management.loader_settings: {fileID: 11400000, guid: dabbe101146204acc8ab978d04c8d178, type: 2}
     com.unity.xr.openxr.settings4: {fileID: 11400000, guid: bf9c3db56b3db4ca1adc90deccafe634, type: 2}

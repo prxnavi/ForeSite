@@ -32,3 +32,10 @@
 *.aab
 *.unitypackage
 *.app
+
+# Cascade: large/generated files kept out of git
+/Assets/Screenshots/
+/Assets/Screenshots.meta
+/Assets/StreamingAssets/Whisper/*.bin
+/Assets/StreamingAssets/Whisper/*.bin.meta
+/.utmp/

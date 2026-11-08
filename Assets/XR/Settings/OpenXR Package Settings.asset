@@ -87,11 +87,11 @@ MonoBehaviour:
     m_List: 00000000i
   m_depthSubmissionMode: 0
   m_spacewarpMotionVectorTextureFormat: 0
-  m_optimizeBufferDiscards: 0
+  m_optimizeBufferDiscards: 1
   m_symmetricProjection: 0
   m_optimizeMultiviewRenderRegions: 0
   m_multiviewRenderRegionsOptimizationMode: 0
-  m_hasMigratedMultiviewRenderRegionSetting: 0
+  m_hasMigratedMultiviewRenderRegionSetting: 1
   m_foveatedRenderingApi: 1
   m_useOpenXRPredictedTime: 1
 --- !u!114 &-8818486013074461098
@@ -241,7 +241,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 6096094d69d82cc40947df806f66ab34, type: 3}
   m_Name: OpenXRCompositionLayersFeature Android
   m_EditorClassIdentifier: Unity.XR.OpenXR::UnityEngine.XR.OpenXR.Features.CompositionLayers.OpenXRCompositionLayersFeature
-  m_enabled: 0
+  m_enabled: 1
   nameUi: Composition Layers Support
   version: 1.0.0
   featureIdInternal: com.unity.openxr.feature.compositionlayers
@@ -955,7 +955,7 @@ MonoBehaviour:
   m_symmetricProjection: 0
   m_optimizeMultiviewRenderRegions: 0
   m_multiviewRenderRegionsOptimizationMode: 0
-  m_hasMigratedMultiviewRenderRegionSetting: 0
+  m_hasMigratedMultiviewRenderRegionSetting: 1
   m_foveatedRenderingApi: 1
   m_useOpenXRPredictedTime: 1
 --- !u!114 &-1068240751529002849
@@ -1510,7 +1510,7 @@ MonoBehaviour:
   lateLatchingDebug: 0
   optimizeMultiviewRenderRegions: 0
   m_multiviewRenderRegionsOptimizationMode: 0
-  m_hasMigratedMultiviewRenderRegions: 0
+  m_hasMigratedMultiviewRenderRegions: 1
   spacewarpMotionVectorTextureFormat: 0
 --- !u!114 &3165709614420617583
 MonoBehaviour:
@@ -1852,7 +1852,7 @@ MonoBehaviour:
   m_symmetricProjection: 0
   m_optimizeMultiviewRenderRegions: 0
   m_multiviewRenderRegionsOptimizationMode: 0
-  m_hasMigratedMultiviewRenderRegionSetting: 0
+  m_hasMigratedMultiviewRenderRegionSetting: 1
   m_foveatedRenderingApi: 1
   m_useOpenXRPredictedTime: 1
 --- !u!114 &5836816137200820950

@@ -60,7 +60,7 @@ namespace CbreTwin.EditorTools
             EditorUtility.SetDirty(perTarget);
             AssetDatabase.SaveAssets();
 
-            if (!File.Exists(ConfigPath)) WriteConfig(LanServer());
+            if (!File.Exists(ConfigPath)) WriteConfig(TwinConnection.DefaultServer);
 
             EditorUtility.DisplayDialog("Keystone",
                 (assigned ? "Project is set up for Meta Quest (Android, IL2CPP ARM64, Vulkan, Oculus XR loader).\n\n" : "Android settings applied, but the Oculus XR loader couldn't be assigned automatically. Enable it in Project Settings → XR Plug-in Management → Android.\n\n") +
@@ -87,7 +87,7 @@ namespace CbreTwin.EditorTools
         public static void BuildAndRun()
         {
             if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.Android) Configure();
-            if (!File.Exists(ConfigPath)) WriteConfig(LanServer());
+            if (!File.Exists(ConfigPath)) WriteConfig(TwinConnection.DefaultServer);
             Directory.CreateDirectory("Builds");
             var scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray();
             if (scenes.Length == 0) scenes = new[] { "Assets/Scenes/SampleScene.unity" };
@@ -107,7 +107,7 @@ namespace CbreTwin.EditorTools
             var cfg = new TwinConnection.AppConfig
             {
                 server = server,
-                database = PlayerPrefs.GetString("twin.db", TwinConnection.DefaultDb),
+                database = server.Contains("maincloud") ? TwinConnection.DefaultDb : PlayerPrefs.GetString("twin.db", TwinConnection.DefaultDb),
                 witToken = PlayerPrefs.GetString("keystone.wit_token", ""),
                 playerName = "Quest visitor",
             };

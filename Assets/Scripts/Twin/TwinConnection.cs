@@ -43,8 +43,8 @@ namespace CbreTwin
         public event Action<string> OnStatus;
         public event Action<string> OnReducerError;
 
-        public const string DefaultServer = "http://127.0.0.1:3000";
-        public const string DefaultDb = "cbre-twin";
+        public const string DefaultServer = "https://maincloud.spacetimedb.com";
+        public const string DefaultDb = "hackutd-g14me";
 
         /// <summary>Build-time defaults (Resources/keystone_config.json), used on headsets where nothing can be typed.</summary>
         [Serializable]

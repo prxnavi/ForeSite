@@ -89,6 +89,12 @@ NEMOTRON_MODEL=nvidia/nemotron-3-super-120b-a12b NEMOTRON_SPECIALIST_MODEL=nvidi
 
 Without a key, the same agent graph runs with deterministic specialists, so the demo never breaks. The trace says which mode ran.
 
+### Shared backend (live now)
+
+The module is published to Maincloud as **`hackutd-g14me`** (identity `c20041900d8c…bd2481`, dashboard: <https://spacetimedb.com/hackutd-g14me>). The desktop app, the Quest build and `SpacetimeServer/spacetime.json` all default to it, so `spacetime publish --yes` from `SpacetimeServer/` updates the shared database. For an older database that existed before this module, run `spacetime call hackutd-g14me seed_if_empty` once to load the demo homes.
+
+For local-only development, add `--server local` to the commands, and set the app's **Server settings** to `http://127.0.0.1:3000` and `cbre-twin`.
+
 ### 3. Maincloud (HackUTD credits)
 
 1. Run `spacetime login`. Then redeem the code **`HackUTD2026`** in your SpacetimeDB account on spacetimedb.com.

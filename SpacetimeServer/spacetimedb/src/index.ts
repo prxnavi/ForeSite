@@ -63,13 +63,21 @@ function recomputeAll(ctx: Ctx) {
   for (const b of ctx.db.blueprint.iter()) recompute(ctx, b.id);
 }
 
-export const init = spacetimedb.init(ctx => {
+function seedAll(ctx: Ctx) {
   const nowYear = 1970 + Number(ctx.timestamp.microsSinceUnixEpoch / 1000n) / (365.2425 * 86400000);
   ctx.db.simulationState.insert({ id: 1, running: false, simMonths: 0, baseYear: nowYear, speedMs: DEFAULT_SPEED_MS });
   seedStatic(ctx);
   seedBlueprints(ctx, nowYear);
   recomputeAll(ctx);
   ctx.db.simTimer.insert({ scheduledId: 0n, scheduledAt: ScheduleAt.interval(BigInt(DEFAULT_SPEED_MS) * 1000n) });
+}
+
+export const init = spacetimedb.init(ctx => seedAll(ctx));
+
+/** Loads the demo homes into a database that was created before this module (init never ran). No-op once seeded. */
+export const seedIfEmpty = spacetimedb.reducer(ctx => {
+  if ([...ctx.db.blueprint.iter()].length > 0) return;
+  seedAll(ctx);
 });
 
 // ───────────────────────────── Identity & presence ──────────────────────────────

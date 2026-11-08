@@ -168,6 +168,12 @@ namespace Cascade
             if (on) PlaceAt(standAt, faceDir);
             else
             {
+                // the tabletop appears right in front of where you are looking now
+                if (IsXR && viewer)
+                {
+                    var fwd = Flat(viewer.forward);
+                    transform.SetPositionAndRotation(viewer.position + fwd * tableDistance + Vector3.down * tableDrop, Quaternion.LookRotation(fwd, Vector3.up));
+                }
                 Twin.transform.SetParent(transform, false);
                 Twin.transform.localPosition = Vector3.zero;
                 Twin.transform.localRotation = Quaternion.identity;

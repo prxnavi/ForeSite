@@ -24,6 +24,13 @@ namespace CbreTwin.EditorTools
         [MenuItem("Keystone/Quest/1. Configure project for Meta Quest", priority = 1)]
         public static void Configure()
         {
+            // Android support installed while the editor was open isn't loaded until Unity restarts;
+            // switching now leaves packages (e.g. XR Hands) unable to compile.
+            if (!BuildPipeline.IsBuildTargetSupported(BuildTargetGroup.Android, BuildTarget.Android))
+            {
+                EditorUtility.DisplayDialog("Keystone", "Android Build Support isn't loaded in this editor session.\n\nIf you just installed it, quit and reopen Unity, then run this again. Otherwise add it in Unity Hub → Installs → Add modules.", "OK");
+                return;
+            }
             if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.Android &&
                 !EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android))
             {

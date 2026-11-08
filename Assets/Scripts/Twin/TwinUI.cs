@@ -164,8 +164,7 @@ namespace CbreTwin
             var top = new VisualElement();
             top.Add(L("Keystone", "brand"));
             top.Add(L("Welcome", "login-title"));
-            top.Add(L("See the house. Know the risks. Price it right.", "login-lede"));
-            top.Add(L("Your name", "field-label"));
+                        top.Add(L("Your name", "field-label"));
             nameField = Field("");
             top.Add(nameField);
             top.Add(L("Company", "field-label"));
@@ -304,10 +303,10 @@ namespace CbreTwin
             var lv = Lbl("FLOOR", 10); lv.style.marginTop = 18; rail.Add(lv);
             levelHost = new VisualElement(); rail.Add(levelHost);
             var shw = Lbl("SHOW", 6); shw.style.marginTop = 18; rail.Add(shw);
-            rail.Add(Switch("Problem areas", true, v => { builder.ShowStructural = v; builder.RefreshOverlays(); }));
+            rail.Add(Switch("Problems", true, v => { builder.ShowStructural = v; builder.RefreshOverlays(); }));
             rail.Add(Switch("Systems", true, v => { builder.ShowSystems = v; builder.RefreshOverlays(); RebuildMarkers(); }));
-            rail.Add(Switch("How damage spreads", true, v => { builder.ShowCascade = v; builder.RefreshOverlays(); }));
-            rail.Add(Switch("Room names", true, v => { showLabels = v; RebuildMarkers(); }));
+            rail.Add(Switch("Spread", true, v => { builder.ShowCascade = v; builder.RefreshOverlays(); }));
+            rail.Add(Switch("Labels", true, v => { showLabels = v; RebuildMarkers(); }));
             rail.Add(Switch("Teammates", true, v => showTeammates = v));
             rail.Add(Switch("Roof", false, v => { builder.ShowRoof = v; RebuildScene(false); }));
             var vw = Lbl("VIEW", 10); vw.style.marginTop = 18; rail.Add(vw);
@@ -416,9 +415,8 @@ namespace CbreTwin
                 card.Add(stripe);
                 var body = new VisualElement(); body.AddToClassList("prop-body");
                 body.Add(L(b.Name, "prop-name"));
-                body.Add(L($"{loc?.City}  ·  {(b.Stage == "existing" ? b.YearBuilt.ToString() : "New build")}", "prop-meta"));
-                body.Add(L("WALKTHROUGH READY", "walk-tag"));
-                card.Add(body);
+                body.Add(L($"{loc?.City} · {(b.Stage == "existing" ? b.YearBuilt.ToString() : "New")}", "prop-meta"));
+                                card.Add(body);
                 var id = b.Id;
                 card.RegisterCallback<ClickEvent>(_ => SelectBlueprint(id));
                 propList.Add(card);
@@ -442,7 +440,7 @@ namespace CbreTwin
             if (selectedBp == 0 || (appLayer.style.display == DisplayStyle.None && rig.Mode != ViewMode.Tour)) return;
 
             float prog = Mathf.Clamp01((Time.time - builder.BuildStartTime) / Mathf.Max(0.1f, builder.BuildDuration));
-            buildLine.text = prog < 1 ? $"Building model  {prog * 100:0}%" : $"{builder.RoomsById.Count} rooms  ·  {builder.FloorCount} floor{(builder.FloorCount > 1 ? "s" : "")}";
+            buildLine.text = prog < 1 ? $"Building {prog * 100:0}%" : "";
 
             if (Time.unscaledTime < nextRefresh) return;
             nextRefresh = Time.unscaledTime + 0.25f;
@@ -514,9 +512,9 @@ namespace CbreTwin
             if (s != null) tiles.Add(Tile("Structure", $"{s.IntegrityScore:0}/100", s.IntegrityScore >= 80 ? Palette.Teal : s.IntegrityScore >= 55 ? Palette.Amber : Palette.Coral));
             if (v != null)
             {
-                tiles.Add(Tile("Risk this year", Palette.Money(v.ExpectedLoss12Mo), Palette.Pink));
-                tiles.Add(Tile(b.Stage == "existing" ? "List price" : "Value when done", Palette.Money(v.ListPrice), Palette.Violet));
-                tiles.Add(Tile("Days to sell", $"{v.DaysOnMarket:0}", Palette.SkyBlue));
+                tiles.Add(Tile("Risk / yr", Palette.Money(v.ExpectedLoss12Mo), Palette.Pink));
+                tiles.Add(Tile(b.Stage == "existing" ? "Price" : "Value", Palette.Money(v.ListPrice), Palette.Violet));
+                tiles.Add(Tile("Days", $"{v.DaysOnMarket:0}", Palette.SkyBlue));
             }
         }
 
@@ -587,7 +585,7 @@ namespace CbreTwin
         {
             var s = net.Summary(selectedBp);
             var c1 = Card(240);
-            c1.Add(L("STRUCTURE SCORE", "label"));
+            c1.Add(L("SCORE", "label"));
             var n = L(s != null ? $"{s.IntegrityScore:0}" : "—", "huge");
             n.style.color = s == null ? Palette.Muted : s.IntegrityScore >= 80 ? Palette.Teal : s.IntegrityScore >= 55 ? Palette.Amber : Palette.Coral;
             c1.Add(n);
@@ -599,7 +597,7 @@ namespace CbreTwin
                 r.Add(Pill($"{s.OkCount} good", "pill-teal"));
                 c1.Add(r);
             }
-            var list = CardList(Card(0, 1), "What to look at");
+            var list = CardList(Card(0, 1), "Issues");
             foreach (var f in net.Findings(selectedBp).Where(f => f.Severity != "ok").OrderByDescending(f => f.Severity == "critical" ? 1 : 0).ThenByDescending(f => f.FixCost))
             {
                 var row = new VisualElement(); row.AddToClassList("line");
@@ -616,7 +614,7 @@ namespace CbreTwin
         {
             var comps = net.Components(selectedBp).ToDictionary(c => c.Id);
             var open = new HashSet<uint>(net.WorkOrders(selectedBp).Where(w => w.Status != "done").Select(w => w.ComponentId));
-            var list = CardList(Card(0, 1.6f), "Chance of failing this year");
+            var list = CardList(Card(0, 1.6f), "Failure risk · 12 mo");
             foreach (var r in net.Risks(selectedBp))
             {
                 if (!comps.TryGetValue(r.ComponentId, out var c)) continue;
@@ -630,7 +628,7 @@ namespace CbreTwin
                 row.RegisterCallback<ClickEvent>(e => { if (e.target is Button) return; SelectComponent(cid); });
                 list.Add(row);
             }
-            var paths = CardList(Card(360), "How damage spreads");
+            var paths = CardList(Card(360), "Spread");
             foreach (var p in net.Paths(selectedBp).Take(4))
             {
                 var row = new VisualElement(); row.style.marginBottom = 12;
@@ -646,19 +644,19 @@ namespace CbreTwin
             var b = net.Blueprint(selectedBp);
             if (v == null || b == null) return;
             var c1 = Card(280);
-            c1.Add(L(b.Stage == "existing" ? "LIST AT" : "WORTH WHEN DONE", "label"));
+            c1.Add(L(b.Stage == "existing" ? "LIST" : "VALUE", "label"));
             var p = L(Palette.Money(v.ListPrice), "big"); p.style.color = Palette.Violet; c1.Add(p);
             c1.Add(L($"{Palette.Money(v.LowPrice)} – {Palette.Money(v.HighPrice)}", "soft"));
             if (v.ValueUnlocked > 0)
             {
-                var u = L($"Fix first and gain {Palette.Money(v.ValueUnlocked)}", "h3"); u.style.color = Palette.Teal; u.style.marginTop = 14; u.AddToClassList("wrap");
+                var u = L($"+{Palette.Money(v.ValueUnlocked)} if fixed first", "h3"); u.style.color = Palette.Teal; u.style.marginTop = 14; u.AddToClassList("wrap");
                 c1.Add(u);
             }
-            var feats = CardList(Card(0, 1), "What sells here");
+            var feats = CardList(Card(0, 1), "Selling points");
             var wrap = new VisualElement(); wrap.AddToClassList("row"); wrap.style.flexWrap = Wrap.Wrap;
             foreach (var f in net.Features(selectedBp).Take(10)) wrap.Add(Pill(f.Name, f.Present ? "pill-teal" : "pill-gray"));
             feats.Add(wrap);
-            var up = L("Best upgrades", "h3"); up.style.marginTop = 10; up.style.marginBottom = 4; feats.Add(up);
+            var up = L("Top upgrades", "h3"); up.style.marginTop = 10; up.style.marginBottom = 4; feats.Add(up);
             foreach (var u in net.Upgrades(selectedBp).Take(3))
             {
                 var row = new VisualElement(); row.AddToClassList("line");
@@ -666,7 +664,7 @@ namespace CbreTwin
                 row.Add(Pill($"{u.Roi:0.0}×", u.Roi >= 1 ? "pill-teal" : "pill-amber"));
                 feats.Add(row);
             }
-            var locs = CardList(Card(320), "Same house, other cities");
+            var locs = CardList(Card(320), "Other cities");
             var lp = net.LocationPricing(selectedBp);
             double max = lp.Count > 0 ? lp.Max(x => x.ListPrice) : 1;
             foreach (var x in lp)
@@ -686,7 +684,7 @@ namespace CbreTwin
         {
             var list = CardList(Card(0, 1.2f), "Work orders");
             var orders = net.WorkOrders(selectedBp);
-            if (orders.Count == 0) list.Add(L("Nothing booked yet. Tap Fix on a system, or ask the agent.", "soft"));
+            if (orders.Count == 0) list.Add(L("Nothing booked.", "soft"));
             foreach (var w in orders)
             {
                 var row = new VisualElement(); row.AddToClassList("line");
@@ -699,7 +697,7 @@ namespace CbreTwin
             }
             var al = CardList(Card(0, 1), "Alerts");
             var alerts = net.Alerts(selectedBp);
-            if (alerts.Count == 0) al.Add(L("Press Simulate to watch the house age.", "soft"));
+            if (alerts.Count == 0) al.Add(L("No alerts.", "soft"));
             foreach (var a in alerts.Take(20))
             {
                 var row = new VisualElement(); row.AddToClassList("line");
@@ -714,16 +712,15 @@ namespace CbreTwin
             var c = Card(0, 1);
             var head = new VisualElement(); head.AddToClassList("row"); head.style.marginBottom = 8;
             var h = L("Notes", "h3"); h.style.flexGrow = 1; head.Add(h);
-            head.Add(L(VoiceHub.Ready ? "Hold V to speak a note" : "Type a note, or set up voice in Ask the agent", "soft"));
-            c.Add(head);
+                        c.Add(head);
             var add = new VisualElement(); add.AddToClassList("row"); add.style.marginBottom = 8;
-            var f = Field("Write a note for this home"); f.style.flexGrow = 1; add.Add(f);
+            var f = Field("Add a note"); f.style.flexGrow = 1; add.Add(f);
             add.Add(Btn("Add", () => { SaveNote(f.value, "text"); f.value = ""; }, "btn-primary"));
             var mic = new Button(() => ToggleVoice("note")) { text = "MIC" }; mic.AddToClassList("mic"); add.Add(mic);
             c.Add(add);
             var sv = new ScrollView(ScrollViewMode.Vertical); sv.style.flexGrow = 1; c.Add(sv);
             var notes = net.Notes(selectedBp);
-            if (notes.Count == 0) sv.Add(L("No notes yet.", "soft"));
+            if (notes.Count == 0) sv.Add(L("No notes.", "soft"));
             foreach (var n in notes)
             {
                 var row = new VisualElement(); row.AddToClassList("line");
@@ -758,7 +755,7 @@ namespace CbreTwin
         {
             var left = new ScrollView(ScrollViewMode.Vertical); left.AddToClassList("agent-left");
             left.Add(L("Ask about", "h2"));
-            var sub = L("Pick a topic, then a question.", "soft"); sub.style.marginBottom = 14; left.Add(sub);
+            var sub = new VisualElement(); sub.style.height = 14; left.Add(sub);
             topicGrid = new VisualElement(); topicGrid.AddToClassList("topic-grid"); left.Add(topicGrid);
             itemHost = new VisualElement(); itemHost.AddToClassList("row"); itemHost.style.flexWrap = Wrap.Wrap; itemHost.style.marginTop = 6; left.Add(itemHost);
             questionHost = new VisualElement(); questionHost.style.marginTop = 8; left.Add(questionHost);
@@ -767,14 +764,14 @@ namespace CbreTwin
             var center = new VisualElement(); center.AddToClassList("agent-center");
             var head = new VisualElement(); head.AddToClassList("chat-head");
             head.Add(L("Keystone agent", "h2"));
-            agentStatus = L("Nemotron team: structure, operations and market", "soft"); head.Add(agentStatus);
+            agentStatus = L("Nemotron", "soft"); head.Add(agentStatus);
             center.Add(head);
             chatScroll = new ScrollView(ScrollViewMode.Vertical); chatScroll.AddToClassList("chat"); chatBox = chatScroll.contentContainer;
             center.Add(chatScroll);
             thinkingRow = new VisualElement(); thinkingRow.AddToClassList("thinking"); thinkingRow.style.display = DisplayStyle.None;
             center.Add(thinkingRow);
             var comp = new VisualElement(); comp.AddToClassList("composer");
-            askField = Field("Ask anything about this home");
+            askField = Field("Ask anything");
             askField.RegisterCallback<KeyDownEvent>(e => { if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter) { Ask(askField.value); askField.value = ""; e.StopPropagation(); } }, TrickleDown.TrickleDown);
             comp.Add(askField);
             comp.Add(Btn("Send", () => { Ask(askField.value); askField.value = ""; }, "btn-primary"));
@@ -785,7 +782,7 @@ namespace CbreTwin
 
             var right = new ScrollView(ScrollViewMode.Vertical); right.AddToClassList("agent-right");
             var stepsCard = new VisualElement(); stepsCard.AddToClassList("card"); stepsCard.style.marginRight = 0;
-            stepsCard.Add(L("What the agents did", "h3"));
+            stepsCard.Add(L("Agent steps", "h3"));
             stepsScroll = new ScrollView(ScrollViewMode.Vertical); stepsScroll.style.maxHeight = 380; stepsScroll.style.marginTop = 10;
             stepsBox = stepsScroll.contentContainer;
             stepsCard.Add(stepsScroll);
@@ -838,7 +835,7 @@ namespace CbreTwin
                         itemHost.Add(p);
                     }
                 questionHost.Clear();
-                foreach (var q in QuestionsFor(agentTopic, agentItem))
+                foreach (var q in QuestionsFor(agentTopic, agentItem).Take(2))
                 {
                     var text = q;
                     var b = Btn(q, () => Ask(text), null);
@@ -852,20 +849,20 @@ namespace CbreTwin
             }
 
             var run = net.LatestRun(selectedBp);
-            if (run != null) agentStatus.text = run.Status == "running" ? "Working on it…" : run.UsedLlm ? $"Answered by {run.Model.Replace("nvidia/", "")}" : "Answered with built-in rules (add an NVIDIA key for Nemotron)";
+            if (run != null) agentStatus.text = run.Status == "running" ? "Working…" : run.UsedLlm ? run.Model.Replace("nvidia/", "") : "Built-in rules";
 
             var msgs = net.Messages(selectedBp);
             if (msgs.Count != lastMsgCount)
             {
                 lastMsgCount = msgs.Count;
                 chatBox.Clear();
-                if (msgs.Count == 0) chatBox.Add(Bubble("Agent", role == "construction_manager" ? "Hi! Ask me about structure, what might fail during the build, or what to do next. I can book work too." : "Hi! Ask me what this home should list for, what sells, or what to fix first. I can book work too.", false));
+                if (msgs.Count == 0) chatBox.Add(Bubble("Agent", "Ask me anything about this home.", false));
                 foreach (var m in msgs) chatBox.Add(Bubble(m.Role == "user" ? m.AuthorName : "Agent", Clean(m.Content), m.Role == "user"));
                 chatScroll.schedule.Execute(() => chatScroll.scrollOffset = new Vector2(0, chatScroll.contentContainer.layout.height)).ExecuteLater(30);
             }
 
             stepsBox.Clear();
-            if (run == null) stepsBox.Add(L("Each step shows up here live.", "soft"));
+            if (run == null) stepsBox.Add(L("—", "soft"));
             else
                 foreach (var s in net.Steps(run.Id))
                 {
@@ -981,12 +978,10 @@ namespace CbreTwin
             var h = L("Voice", "h3"); h.style.flexGrow = 1; head.Add(h);
             head.Add(Pill(!VoiceHub.Available ? "SDK missing" : VoiceHub.Ready ? "Ready" : "Needs token", !VoiceHub.Available ? "pill-coral" : VoiceHub.Ready ? "pill-teal" : "pill-amber"));
             voiceCard.Add(head);
-            var t = L(VoiceHub.Available
-                ? "Meta Voice SDK (Wit.ai). Hold V anywhere, or tap MIC. Say a note, \"next room\", \"fix the roof\", or ask a question."
-                : "Install com.meta.xr.sdk.voice (already in the package manifest) to enable voice.", "soft");
+            var t = L(VoiceHub.Available ? "Hold V or tap MIC." : "Meta Voice SDK not installed.", "soft");
             t.style.marginTop = 6; voiceCard.Add(t);
             if (!VoiceHub.Available) return;
-            tokenField = Field("Wit.ai client access token");
+            tokenField = Field("Wit.ai token");
             tokenField.isPasswordField = true;
             tokenField.value = PlayerPrefs.GetString(TokenKey, "");
             tokenField.style.marginTop = 10;
@@ -1331,7 +1326,7 @@ namespace CbreTwin
             gaze.Add(gazeTitle); gaze.Add(gazeSub); gaze.Add(gazeFill);
             gaze.style.display = DisplayStyle.None;
             tourLayer.Add(gaze);
-            capture = L("Click to look around", "capture glass"); capture.pickingMode = PickingMode.Ignore; tourLayer.Add(capture);
+            capture = L("Click to look", "capture glass"); capture.pickingMode = PickingMode.Ignore; tourLayer.Add(capture);
 
             var top = new VisualElement(); top.AddToClassList("tour-top"); top.AddToClassList("glass");
             tourStep = L("", "label"); tourRoom = L("", "tour-room"); tourSub = L("", "tour-sub");
@@ -1340,7 +1335,7 @@ namespace CbreTwin
             tourLayer.Add(top);
 
             var keys = new VisualElement(); keys.AddToClassList("tour-keys"); keys.AddToClassList("glass");
-            foreach (var (k, t) in new[] { ("WASD", "walk"), ("Mouse", "look"), ("Q E", "turn"), ("T", "jump to spot"), ("N", "next room"), ("V", "hold to talk"), ("Esc", "free cursor"), ("X", "exit") })
+            foreach (var (k, t) in new[] { ("WASD", "walk"), ("N", "next"), ("V", "talk"), ("X", "exit") })
             {
                 var r = new VisualElement(); r.AddToClassList("row"); r.style.marginTop = 4;
                 r.Add(L(k, "kbd")); r.Add(L(t, "key-line"));
@@ -1349,8 +1344,7 @@ namespace CbreTwin
             tourLayer.Add(keys);
 
             var say = new VisualElement(); say.AddToClassList("tour-say"); say.AddToClassList("glass");
-            say.Add(L("THIS ROOM", "label"));
-            tourSay = L("", "tour-say-text"); tourSay.style.marginTop = 6; tourSay.enableRichText = false;
+                        tourSay = L("", "tour-say-text"); tourSay.style.marginTop = 6; tourSay.enableRichText = false;
             say.Add(tourSay);
             tourLayer.Add(say);
 

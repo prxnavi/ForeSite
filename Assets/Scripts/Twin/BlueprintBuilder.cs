@@ -39,7 +39,7 @@ namespace CbreTwin
     }
 
     /// <summary>Procedurally generates a walkable 3D model from blueprint rows.</summary>
-    public class BlueprintBuilder : MonoBehaviour
+    public partial class BlueprintBuilder : MonoBehaviour
     {
         public const float FT = 0.3048f;
         public const int WallLayer = 2; // "Ignore Raycast": blocks the visitor, not mouse picks
@@ -188,10 +188,11 @@ namespace CbreTwin
             delay = 0;
 
             // Site: a soft ground plane and a slightly lighter lot
-            Box(groundRoot, new Vector3(cx, -0.8f, cz), new Vector3(maxX - minX + pad * 6, 0.4f, maxZ - minZ + pad * 6), PlanMode ? Palette.PlanPaper : Palette.Ground, animate: false);
+            if (PlanMode) Box(groundRoot, new Vector3(cx, -0.8f, cz), new Vector3(maxX - minX + pad * 6, 0.4f, maxZ - minZ + pad * 6), Palette.PlanPaper, animate: false);
+            else TBox(groundRoot, new Vector3(cx, -0.8f, cz), new Vector3(maxX - minX + pad * 6, 0.4f, maxZ - minZ + pad * 6), ProcTex.Kind.Grass, Color.white, animate: false, smooth: 0.05f);
             if (!PlanMode)
             {
-                Box(groundRoot, new Vector3(cx, -0.55f, cz), new Vector3(maxX - minX + pad * 2, 0.2f, maxZ - minZ + pad * 2), Palette.Hex("#E1E6D8"), animate: false);
+                TBox(groundRoot, new Vector3(cx, -0.55f, cz), new Vector3(maxX - minX + 8, 0.2f, maxZ - minZ + 8), ProcTex.Kind.Stone, new Color(0.95f, 0.93f, 0.9f), animate: false);
                 var garage = rooms.FirstOrDefault(r => r.Kind == "garage" && r.Floor == 0);
                 if (garage != null)
                     Box(groundRoot, new Vector3((float)(garage.X + garage.W / 2), -0.4f, (float)garage.Z - pad / 2f), new Vector3((float)garage.W * 0.9f, 0.1f, pad), Palette.Hex("#D6D4CF"), animate: false);
@@ -256,7 +257,10 @@ namespace CbreTwin
             }
             else
             {
-                slab = Box(parent, center, new Vector3((float)r.W, SlabT, (float)r.D), c, keepCollider: true, smooth: r.Kind == "kitchen" || r.Kind == "bath" ? 0.45f : 0.25f);
+                slab = PlanMode
+                    ? Box(parent, center, new Vector3((float)r.W, SlabT, (float)r.D), c, keepCollider: true)
+                    : TBox(parent, center, new Vector3((float)r.W, SlabT, (float)r.D), FloorKind(r.Kind), FloorTint(r.Kind), keepCollider: true,
+                        smooth: r.Kind == "kitchen" || r.Kind == "bath" ? 0.55f : r.Kind == "garage" ? 0.15f : 0.35f);
             }
             slab.AddComponent<RoomTag>().RoomId = r.Id;
             slab.name = $"Room {r.Name}";
@@ -471,97 +475,9 @@ namespace CbreTwin
                 if (y0 > 0.1f) return;
                 size.y = 1.2f; cen.y = baseY + 0.6f;
             }
-            Box(parent, cen, size, c, solid: !PlanMode);
-        }
-
-        // ───────────── Furniture ─────────────
-
-        void BuildFurniture(Transform p, Room r, float y)
-        {
-            float cx = (float)(r.X + r.W / 2), cz = (float)(r.Z + r.D / 2), w = (float)r.W, d = (float)r.D;
-            var oak = Palette.Hex("#B08B66"); var fabric = Palette.Hex("#A9A49B"); var linen = Palette.Hex("#F3F0EA");
-            var stone = Palette.Hex("#F1EFEA"); var dark = Palette.Hex("#3A3C40");
-            switch (r.Kind)
-            {
-                case "living":
-                    Box(p, new Vector3(cx, y + 0.04f, cz), new Vector3(w * 0.5f, 0.06f, d * 0.42f), Palette.Hex("#D8CFC2"));
-                    Box(p, new Vector3(cx, y + 0.9f, cz + d * 0.28f), new Vector3(Mathf.Min(8, w * 0.5f), 1.8f, 3f), fabric);
-                    Box(p, new Vector3(cx, y + 1.6f, cz + d * 0.28f + 1.2f), new Vector3(Mathf.Min(8, w * 0.5f), 1.4f, 0.7f), fabric);
-                    Box(p, new Vector3(cx, y + 0.65f, cz), new Vector3(4f, 0.25f, 2.2f), oak);
-                    break;
-                case "kitchen":
-                    Box(p, new Vector3(cx, y + 1.5f, cz), new Vector3(Mathf.Min(8, w * 0.45f), 3f, 3.4f), dark);
-                    Box(p, new Vector3(cx, y + 3.05f, cz), new Vector3(Mathf.Min(8, w * 0.45f) + 0.3f, 0.12f, 3.7f), stone);
-                    Box(p, new Vector3(cx, y + 1.5f, (float)r.Z + 1.3f), new Vector3(w * 0.85f, 3f, 2.1f), Palette.Hex("#E7E3DB"));
-                    Box(p, new Vector3(cx, y + 6f, (float)r.Z + 0.9f), new Vector3(w * 0.85f, 2.4f, 1.2f), Palette.Hex("#E7E3DB"));
-                    break;
-                case "dining":
-                    Box(p, new Vector3(cx, y + 2.45f, cz), new Vector3(Mathf.Min(6.5f, w * 0.5f), 0.15f, 3.4f), oak);
-                    Box(p, new Vector3(cx, y + 1.2f, cz), new Vector3(0.5f, 2.4f, 0.5f), oak);
-                    Box(p, new Vector3(cx, y + 6.6f, cz), new Vector3(1.4f, 0.6f, 1.4f), Palette.Hex("#C9B79C"));
-                    break;
-                case "bedroom":
-                case "primary":
-                    {
-                        float bw = r.Kind == "primary" ? 6.5f : 5f;
-                        float bz = cz + d * 0.12f;
-                        Box(p, new Vector3(cx, y + 0.8f, bz), new Vector3(bw, 1.6f, 6.8f), linen);
-                        Box(p, new Vector3(cx, y + 1.65f, bz - 1.4f), new Vector3(bw + 0.1f, 0.2f, 2.6f), Palette.Hex("#C9BBA8"));
-                        Box(p, new Vector3(cx, y + 1.9f, bz + 3.5f), new Vector3(bw + 0.4f, 3.8f, 0.35f), oak);
-                        Box(p, new Vector3(cx + bw / 2f + 1.2f, y + 1f, bz + 2.9f), new Vector3(1.6f, 2f, 1.4f), oak);
-                        break;
-                    }
-                case "bath":
-                    Box(p, new Vector3(cx, y + 0.9f, (float)(r.Z + r.D) - 1.6f), new Vector3(Mathf.Min(5, w - 1), 1.8f, 2.6f), stone);
-                    Box(p, new Vector3((float)r.X + 1.2f, y + 1.5f, cz), new Vector3(1.8f, 3f, Mathf.Min(4, d - 2)), Palette.Hex("#E2DED6"));
-                    break;
-                case "office":
-                    Box(p, new Vector3(cx, y + 2.4f, cz), new Vector3(5f, 0.15f, 2.4f), oak);
-                    Box(p, new Vector3(cx, y + 3.2f, cz + 0.8f), new Vector3(2.2f, 1.4f, 0.1f), dark);
-                    Box(p, new Vector3(cx, y + 1.2f, cz - 1.8f), new Vector3(1.8f, 2.4f, 1.8f), fabric);
-                    break;
-                case "game":
-                    Box(p, new Vector3(cx, y + 2.6f, cz), new Vector3(4.2f, 0.4f, 7.5f), Palette.Hex("#3F6B57"));
-                    Box(p, new Vector3(cx, y + 1.2f, cz), new Vector3(3.6f, 2.4f, 6.8f), oak);
-                    break;
-                case "media":
-                    Box(p, new Vector3(cx, y + 1f, cz + d * 0.2f), new Vector3(w * 0.6f, 2f, 3.2f), Palette.Hex("#4A4C52"));
-                    Box(p, new Vector3(cx, y + 4f, (float)r.Z + 0.6f), new Vector3(w * 0.6f, 3.6f, 0.15f), Palette.Hex("#151618"));
-                    break;
-                case "garage":
-                    {
-                        int cars = Mathf.Clamp(Mathf.FloorToInt(w / 10.5f), 1, 3);
-                        var cols = new[] { Palette.Hex("#8C939C"), Palette.Hex("#3B3E44"), Palette.Hex("#D8D4CC") };
-                        for (int i = 0; i < cars; i++)
-                        {
-                            float x = (float)r.X + w * (i + 0.5f) / cars;
-                            Box(p, new Vector3(x, y + 1.4f, cz), new Vector3(6f, 2.6f, 14.5f), cols[i], smooth: 0.6f);
-                            Box(p, new Vector3(x, y + 3.3f, cz + 1f), new Vector3(5.4f, 1.4f, 7f), Palette.Hex("#AEB8BF"), transparent: true, alpha: 0.75f);
-                        }
-                        break;
-                    }
-                case "stair":
-                    {
-                        const int steps = 12;
-                        bool alongZ = d >= w;
-                        for (int i = 0; i < steps; i++)
-                        {
-                            float t = (i + 0.5f) / steps;
-                            var size = alongZ ? new Vector3(w * 0.8f, (i + 1) * 0.75f, d / steps) : new Vector3(w / steps, (i + 1) * 0.75f, d * 0.8f);
-                            var pos = alongZ ? new Vector3(cx, y + size.y / 2f, (float)r.Z + d * t) : new Vector3((float)r.X + w * t, y + size.y / 2f, cz);
-                            Box(p, pos, size, Palette.Hex("#C7B497"));
-                        }
-                        break;
-                    }
-                case "patio":
-                    Box(p, new Vector3(cx - 3, y + 2.4f, cz), new Vector3(6f, 0.15f, 3.5f), oak);
-                    Box(p, new Vector3(cx + 5, y + 0.9f, cz), new Vector3(6f, 1.8f, 2.6f), fabric);
-                    break;
-                case "deck":
-                    Box(p, new Vector3(cx, y + 1.2f, cz), new Vector3(2.5f, 2.4f, 2.5f), Palette.Hex("#6D8C68"));
-                    Box(p, new Vector3(cx + 5, y + 0.9f, cz - 4), new Vector3(7f, 1.8f, 2.6f), fabric);
-                    break;
-            }
+            if (PlanMode) { Box(parent, cen, size, c); return; }
+            TBox(parent, cen, size, ProcTex.Kind.Plaster, c, wallTiling: true, solid: true, smooth: 0.15f);
+            if (y0 < 0.1f && size.y > 1f) Baseboard(parent, cen, size, e.Horiz);
         }
 
         // ───────────── Overlays ─────────────

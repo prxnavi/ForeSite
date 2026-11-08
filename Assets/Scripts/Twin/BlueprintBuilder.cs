@@ -80,40 +80,22 @@ namespace CbreTwin
 
         // ───────────── Materials ─────────────
 
-        Shader litShader;
-
         Material Mat(Color c, bool transparent = false, float alpha = 1f, bool emissive = false, float smooth = 0.2f)
         {
             var key = $"{ColorUtility.ToHtmlStringRGBA(c)}:{transparent}:{alpha:0.00}:{emissive}:{smooth:0.0}";
             if (mats.TryGetValue(key, out var m)) return m;
-            litShader ??= Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
-            m = new Material(litShader);
+            m = ShaderLib.Create(transparent ? ShaderLib.Kind.LitTransparent : emissive ? ShaderLib.Kind.LitEmissive : ShaderLib.Kind.LitOpaque);
             var col = new Color(c.r, c.g, c.b, transparent ? alpha : 1f);
             m.SetColor("_BaseColor", col);
             m.color = col;
             m.SetFloat("_Smoothness", transparent ? 0.92f : smooth);
-            if (transparent)
-            {
-                m.SetFloat("_Surface", 1f);
-                m.SetFloat("_Blend", 0f);
-                m.SetFloat("_SrcBlend", (float)UnityEngine.Rendering.BlendMode.SrcAlpha);
-                m.SetFloat("_DstBlend", (float)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-                m.SetFloat("_ZWrite", 0f);
-                m.SetOverrideTag("RenderType", "Transparent");
-                m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
-                m.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
-            }
-            if (emissive)
-            {
-                m.EnableKeyword("_EMISSION");
-                m.SetColor("_EmissionColor", c * 0.6f);
-            }
+            if (emissive) m.SetColor("_EmissionColor", c * 0.6f);
             mats[key] = m;
             return m;
         }
 
         Material lineMat;
-        Material LineMat() => lineMat ??= new Material(Shader.Find("Sprites/Default"));
+        Material LineMat() => lineMat ??= ShaderLib.Create(ShaderLib.Kind.Line);
 
         // ───────────── Primitive helpers ─────────────
 

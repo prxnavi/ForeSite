@@ -24,8 +24,7 @@ namespace CbreTwin
             tiling = new Vector2(Mathf.Max(0.25f, Mathf.Round(tiling.x * 2) / 2), Mathf.Max(0.25f, Mathf.Round(tiling.y * 2) / 2));
             var key = $"{kind}:{ColorUtility.ToHtmlStringRGB(tint)}:{tiling.x}:{tiling.y}:{smooth:0.0}";
             if (texMats.TryGetValue(key, out var m) && m != null) return m;
-            litShader ??= Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
-            m = new Material(litShader);
+            m = ShaderLib.Create(ShaderLib.Kind.LitOpaque);
             var tex = ProcTex.Get(kind);
             m.SetTexture("_BaseMap", tex);
             m.mainTexture = tex;

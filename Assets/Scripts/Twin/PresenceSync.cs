@@ -81,7 +81,7 @@ namespace CbreTwin
         {
             var key = ColorUtility.ToHtmlStringRGB(c);
             if (mats.TryGetValue(key, out var m)) return m;
-            m = new Material(Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard"));
+            m = ShaderLib.Create(ShaderLib.Kind.LitOpaque);
             m.SetColor("_BaseColor", c);
             m.color = c;
             mats[key] = m;

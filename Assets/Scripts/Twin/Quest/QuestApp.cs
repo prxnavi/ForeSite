@@ -399,7 +399,7 @@ namespace CbreTwin
 
         void Update()
         {
-            if (xr == null || xr.Root == null) return;
+            if (xr == null || xr.Root == null || ray == null || hud == null) return;
             UpdateFade();
             UpdatePointer();
             if (!inLobby && bp != 0) UpdateLocomotion();
@@ -556,6 +556,7 @@ namespace CbreTwin
 
         void UpdateFade()
         {
+            if (fadeMat == null || fadeQuad == null) return;
             fadeAlpha = Mathf.MoveTowards(fadeAlpha, fadeTarget, Time.unscaledDeltaTime / 0.15f);
             var c = fadeMat.color; c.a = fadeAlpha; fadeMat.color = c; fadeMat.SetColor("_BaseColor", c);
             fadeQuad.gameObject.SetActive(fadeAlpha > 0.001f);

@@ -33,27 +33,14 @@ namespace CbreTwin
         public static readonly Color White = Color.white;
 
         static Font font;
-        static Shader unlit;
 
         static Font F => font ??= Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
 
         public static Material Flat(Color c)
         {
-            unlit ??= Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Unlit/Color");
-            var m = new Material(unlit);
+            var m = ShaderLib.Create(c.a < 0.999f ? ShaderLib.Kind.UnlitTransparent : ShaderLib.Kind.UnlitOpaque);
             m.SetColor("_BaseColor", c);
             m.color = c;
-            if (c.a < 0.999f)
-            {
-                m.SetFloat("_Surface", 1f);
-                m.SetFloat("_Blend", 0f);
-                m.SetFloat("_SrcBlend", (float)UnityEngine.Rendering.BlendMode.SrcAlpha);
-                m.SetFloat("_DstBlend", (float)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-                m.SetFloat("_ZWrite", 0f);
-                m.SetOverrideTag("RenderType", "Transparent");
-                m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
-                m.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
-            }
             return m;
         }
 

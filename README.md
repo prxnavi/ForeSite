@@ -108,7 +108,7 @@ cd SpacetimeServer && NVIDIA_API_KEY=nvapi-XXXX spacetime publish cbre-twin-<tea
 
 ### Walkthrough mode
 
-Choose **Walk through** in the top bar (or **Walk through from here** on any room) for a first-person, VR-style tour of the generated house:
+Choose **Walkthrough** in the top bar (or **Walk in** on any room). All four example homes have fully connected routes on every floor for a first-person, VR-style tour of the generated house:
 
 - You are at eye height (1.62 m) inside a collision capsule. Walls and glass block you, and doorways let you through.
 - A guided route visits every main room level by level along real doorways, with a short narration per room drawn from the twin's data. Rooms with critical findings are marked on the progress bar.
@@ -134,6 +134,28 @@ After you change the module schema, regenerate the bindings:
 ```bash
 cd SpacetimeServer && spacetime generate --lang csharp --out-dir ../Assets/Scripts/SpacetimeBindings --module-path spacetimedb --yes
 ```
+
+## Voice (Meta Voice SDK)
+
+Voice uses Meta's **Voice SDK** (`com.meta.xr.sdk.voice` 85.0.1, Wit.ai dictation), installed from Meta's registry (`https://npm.developer.oculus.com`, declared in `Packages/manifest.json`). It works in the editor and in desktop players, and the same code runs on Meta Quest.
+
+1. Create a free app at <https://wit.ai> and copy its **Client Access Token** (Settings → Tokens).
+2. In the app, open **Ask the agent → Voice**, paste the token and click **Save**. Alternatively, set `WIT_CLIENT_TOKEN` in the environment before launching.
+3. Hold **V** anywhere, or tap **MIC**, and speak:
+
+| You say | What happens |
+|---|---|
+| Anything else ("water stain on the ceiling by the vent") | Saved as a note, pinned in the room you're in and shared live with everyone |
+| "next room" / "go back" / "exit tour" | Walkthrough navigation |
+| "start the tour" | Opens the walkthrough |
+| "fix the roof" / "book a repair for the water heater" | Creates a work order |
+| A question ("what will fail first?", "ask what should this list for") | Sent to the Nemotron agent |
+
+The agents read the latest notes, so spoken on-site observations feed their answers. The Meta integration is isolated in `Assets/Scripts/MetaVoice/`, an assembly that only compiles when the package is present. The rest of the app talks to `VoiceHub` in `Assets/Scripts/VoiceCore/`.
+
+## Ask the agent
+
+The **Ask the agent** tab lets you pick a topic (Structure, What breaks, Price, Selling points, Build plan, A room, A system, Our notes). Then you can pick a specific room or system and tap a suggested question, or type or speak your own. The agents' steps appear live on the right.
 
 ## Demo script (about 3 minutes)
 
@@ -163,7 +185,9 @@ Assets/Scripts/
   Twin/CameraRig.cs        orbit / plan / immersive walkthrough
   Twin/TourPlanner.cs      doorway-routed guided tour + narration
   Twin/PresenceSync.cs     multi-user presence
-  Twin/TwinUI.cs           login, agent panel, analytics drawer
+  Twin/TwinUI.cs           sign-in, Overview / Walkthrough / Agent pages, voice handling
+  VoiceCore/VoiceHub.cs    voice abstraction used by the UI
+  MetaVoice/MetaVoiceBackend.cs  Meta Voice SDK (Wit.ai dictation) backend
 Assets/Resources/UI/   Twin.uss (light theme), TwinTheme.tss
 ```
 

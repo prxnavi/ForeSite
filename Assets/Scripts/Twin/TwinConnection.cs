@@ -171,6 +171,7 @@ namespace CbreTwin
             U(db.UserProfile, Dirty.Users);
             U(db.SimulationState, Dirty.Sim);
             H(db.Annotation, Dirty.Annotations);
+            H(db.Note, Dirty.Annotations);
         }
 
         // ───────────── Query helpers over the client cache ─────────────
@@ -203,6 +204,7 @@ namespace CbreTwin
         public AgentRun LatestRun(uint bp) => Ready ? Conn.Db.AgentRun.BlueprintId.Filter(bp).OrderByDescending(r => r.Id).FirstOrDefault() : null;
         public List<Presence> Presences(uint bp) => Ready ? Conn.Db.Presence.BlueprintId.Filter(bp).ToList() : new List<Presence>();
         public List<Annotation> Annotations(uint bp) => Ready ? Conn.Db.Annotation.BlueprintId.Filter(bp).ToList() : new List<Annotation>();
+        public List<Note> Notes(uint bp) => Ready ? Conn.Db.Note.BlueprintId.Filter(bp).OrderByDescending(n => n.Id).ToList() : new List<Note>();
         public List<UserProfile> OnlineUsers() => Ready ? Conn.Db.UserProfile.Iter().Where(u => u.Online).ToList() : new List<UserProfile>();
         public SimulationState Sim => Ready ? Conn.Db.SimulationState.Id.Find(1) : null;
         public List<DataSource> Sources() => Ready ? Conn.Db.DataSource.Iter().OrderBy(d => d.Id).ToList() : new List<DataSource>();

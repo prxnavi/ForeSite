@@ -50,6 +50,24 @@ export const annotation = table(
   }
 );
 
+// Field notes: spoken (Meta Voice SDK dictation) or typed, pinned to a room.
+export const note = table(
+  { name: 'note', public: true },
+  {
+    id: t.u64().primaryKey().autoInc(),
+    blueprintId: t.u32().index('btree'),
+    roomId: t.u32(),
+    authorName: t.string(),
+    color: t.string(),
+    text: t.string(),
+    source: t.string(), // 'voice' | 'text'
+    x: t.f32(),
+    y: t.f32(),
+    z: t.f32(),
+    at: t.timestamp(),
+  }
+);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Fragmented real-estate data, unified (location, plans, systems, rules)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -405,6 +423,7 @@ const spacetimedb = schema(
     userProfile,
     presence,
     annotation,
+    note,
     location,
     blueprint,
     room,

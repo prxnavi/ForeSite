@@ -41,6 +41,7 @@ namespace SpacetimeDB.Types
             AddTable(Location = new(conn));
             AddTable(LocationPricing = new(conn));
             AddTable(MyProfile = new(conn));
+            AddTable(Note = new(conn));
             AddTable(Presence = new(conn));
             AddTable(Room = new(conn));
             AddTable(SellingFeature = new(conn));
@@ -547,6 +548,7 @@ namespace SpacetimeDB.Types
             new QueryBuilder().From.Location().ToSql(),
             new QueryBuilder().From.LocationPricing().ToSql(),
             new QueryBuilder().From.MyProfile().ToSql(),
+            new QueryBuilder().From.Note().ToSql(),
             new QueryBuilder().From.Presence().ToSql(),
             new QueryBuilder().From.Room().ToSql(),
             new QueryBuilder().From.SellingFeature().ToSql(),
@@ -577,6 +579,7 @@ namespace SpacetimeDB.Types
         public global::SpacetimeDB.Table<Location, LocationCols, LocationIxCols> Location() => new("location", new LocationCols("location"), new LocationIxCols("location"));
         public global::SpacetimeDB.Table<LocationPricing, LocationPricingCols, LocationPricingIxCols> LocationPricing() => new("location_pricing", new LocationPricingCols("location_pricing"), new LocationPricingIxCols("location_pricing"));
         public global::SpacetimeDB.Table<UserProfile, MyProfileCols, MyProfileIxCols> MyProfile() => new("my_profile", new MyProfileCols("my_profile"), new MyProfileIxCols("my_profile"));
+        public global::SpacetimeDB.Table<Note, NoteCols, NoteIxCols> Note() => new("note", new NoteCols("note"), new NoteIxCols("note"));
         public global::SpacetimeDB.Table<Presence, PresenceCols, PresenceIxCols> Presence() => new("presence", new PresenceCols("presence"), new PresenceIxCols("presence"));
         public global::SpacetimeDB.Table<Room, RoomCols, RoomIxCols> Room() => new("room", new RoomCols("room"), new RoomIxCols("room"));
         public global::SpacetimeDB.Table<SellingFeature, SellingFeatureCols, SellingFeatureIxCols> SellingFeature() => new("selling_feature", new SellingFeatureCols("selling_feature"), new SellingFeatureIxCols("selling_feature"));
@@ -668,9 +671,11 @@ namespace SpacetimeDB.Types
             var eventContext = (ReducerEventContext)context;
             return reducer switch {
                 Reducer.AddAnnotation args => Reducers.InvokeAddAnnotation(eventContext, args),
+                Reducer.AddNote args => Reducers.InvokeAddNote(eventContext, args),
                 Reducer.AdvanceWorkOrder args => Reducers.InvokeAdvanceWorkOrder(eventContext, args),
                 Reducer.CreateWorkOrder args => Reducers.InvokeCreateWorkOrder(eventContext, args),
                 Reducer.DeleteAnnotation args => Reducers.InvokeDeleteAnnotation(eventContext, args),
+                Reducer.DeleteNote args => Reducers.InvokeDeleteNote(eventContext, args),
                 Reducer.RegisterUser args => Reducers.InvokeRegisterUser(eventContext, args),
                 Reducer.ResetDemo args => Reducers.InvokeResetDemo(eventContext, args),
                 Reducer.SelectBlueprint args => Reducers.InvokeSelectBlueprint(eventContext, args),

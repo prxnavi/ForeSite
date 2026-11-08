@@ -18,25 +18,33 @@ namespace CbreTwin
         public static readonly Color Paper = Hex("#F4F2EE");
         public static readonly Color Surface = Hex("#FFFFFF");
         public static readonly Color Line = Hex("#E4E0D8");
-        public static readonly Color Ink = Hex("#1B1C1E");
-        public static readonly Color Ink2 = Hex("#55585E");
-        public static readonly Color Muted = Hex("#8A8D93");
-        public static readonly Color Accent = Hex("#2F5D50");
+        public static readonly Color Ink = Hex("#1E1B4B");
+        public static readonly Color Ink2 = Hex("#3B3A5C");
+        public static readonly Color Muted = Hex("#7A79A0");
+        public static readonly Color Accent = Hex("#6D5DFC");
         public static readonly Color AccentSoft = Hex("#E3ECE8");
         public static readonly Color Clay = Hex("#B9714A");
         public static readonly Color Slate = Hex("#5F7391");
         public static readonly Color Sand = Hex("#C8A96A");
 
+        // Vibrant accents
+        public static readonly Color Violet = Hex("#6D5DFC");
+        public static readonly Color Coral = Hex("#FF6B6B");
+        public static readonly Color Teal = Hex("#12C2A4");
+        public static readonly Color Amber = Hex("#FFB020");
+        public static readonly Color SkyBlue = Hex("#2D9CFF");
+        public static readonly Color Pink = Hex("#FF4FA3");
+
         // Status
-        public static readonly Color Ok = Hex("#3C7A57");
-        public static readonly Color Watch = Hex("#B7791F");
-        public static readonly Color Critical = Hex("#B4443A");
+        public static readonly Color Ok = Hex("#12C2A4");
+        public static readonly Color Watch = Hex("#FFB020");
+        public static readonly Color Critical = Hex("#FF6B6B");
 
         // Scene
-        public static readonly Color Sky3D = Hex("#ECEDEA");
-        public static readonly Color Ground = Hex("#D9DFCF");
-        public static readonly Color PlanPaper = Hex("#F7F6F2");
-        public static readonly Color PlanInk = Hex("#2B2D31");
+        public static readonly Color Sky3D = Hex("#EEF1FF");
+        public static readonly Color Ground = Hex("#D6EBD3");
+        public static readonly Color PlanPaper = Hex("#F6F7FB");
+        public static readonly Color PlanInk = Hex("#3D2FD6");
         public static readonly Color WallInterior = Hex("#FAF9F6");
         public static readonly Color WallExterior = Hex("#EFEBE4");
         public static readonly Color Glass = Hex("#C4D8DF");
@@ -63,19 +71,19 @@ namespace CbreTwin
 
         public static Color Tier(string tier) => tier switch
         {
-            "severe" => Hex("#B4443A"),
-            "high" => Hex("#C2683A"),
-            "elevated" => Hex("#C49A3A"),
-            _ => Hex("#5E8C76"),
+            "severe" => Hex("#FF4D6D"),
+            "high" => Hex("#FF7A45"),
+            "elevated" => Hex("#FFB020"),
+            _ => Hex("#12C2A4"),
         };
 
         public static Color Agent(string agent) => agent switch
         {
-            "structural" => Clay,
-            "operations" => Hex("#8E5A7A"),
-            "market" => Slate,
-            "user" => Ink,
-            _ => Accent,
+            "structural" => Hex("#FF7A45"),
+            "operations" => Hex("#FF4FA3"),
+            "market" => Hex("#12C2A4"),
+            "user" => Hex("#6D5DFC"),
+            _ => Hex("#76B900"),
         };
 
         public static string KindLabel(string kind) => kind switch

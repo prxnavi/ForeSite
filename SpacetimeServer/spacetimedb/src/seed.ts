@@ -231,7 +231,7 @@ export const BLUEPRINTS: BlueprintSeed[] = [
       { name: 'Primary Bath', kind: 'bath', floor: 0, x: 35, z: 22, w: 9, d: 10, glazing: 0.1 },
       { name: 'Bedroom 3', kind: 'bedroom', floor: 0, x: 0, z: 32, w: 11, d: 11, glazing: 0.25 },
       { name: 'Den', kind: 'office', floor: 0, x: 11, z: 32, w: 9, d: 11, glazing: 0.2 },
-      { name: 'Garage', kind: 'garage', floor: 0, x: 35, z: 0, w: 22, d: 22, ceiling: 9, glazing: 0 },
+      { name: 'Garage', kind: 'garage', floor: 0, x: 34, z: 0, w: 23, d: 22, ceiling: 9, glazing: 0 },
       { name: 'Covered Patio', kind: 'patio', floor: 0, x: 0, z: 43, w: 20, d: 10, glazing: 0 },
     ],
     components: [

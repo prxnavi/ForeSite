@@ -76,6 +76,14 @@ function marketDigest(tx: Ctx, bpId: number): string {
   ].join('\n');
 }
 
+function notesDigest(tx: Ctx, bpId: number): string {
+  const rooms = new Map([...tx.db.room.blueprintId.filter(bpId)].map(r => [r.id, r.name]));
+  const notes = [...tx.db.note.blueprintId.filter(bpId)].sort((a, b) => Number(b.id - a.id)).slice(0, 8);
+  if (!notes.length) return '';
+  return '\nField notes from the team (treat as on-site observations):\n' +
+    notes.map(n => `- ${n.authorName} in ${rooms.get(n.roomId) ?? 'the house'}${n.source === 'voice' ? ' (spoken)' : ''}: "${n.text}"`).join('\n');
+}
+
 function simulateFix(tx: Ctx, bpId: number, kind: string): string {
   const d = blueprintRisk(tx, bpId);
   if (!d) return 'Unknown blueprint';
@@ -219,7 +227,7 @@ export const askAgent = spacetimedb.procedure(
         const k = name.replace('consult_', '').replace('_agent', '');
         const spec = SPECIALISTS[k];
         if (!spec) return 'Unknown specialist';
-        const data = read(ctx, tx => spec.digest(tx, blueprintId));
+        const data = read(ctx, tx => spec.digest(tx, blueprintId) + notesDigest(tx, blueprintId));
         step(ctx, runId, blueprintId, k, 'handoff', `Orchestrator → ${spec.title}`, String(args?.question ?? ''));
         if (!key || failed) return data;
         const r = nim(ctx, key, specialistModel, [

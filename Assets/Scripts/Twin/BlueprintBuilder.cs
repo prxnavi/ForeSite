@@ -348,7 +348,7 @@ namespace CbreTwin
 
         static bool GarageBlocks(Room a, Room b)
         {
-            bool Ok(string k) => k == "mudroom" || k == "laundry" || k == "kitchen" || k == "hall";
+            bool Ok(string k) => k == "mudroom" || k == "laundry" || k == "kitchen" || k == "hall" || k == "office";
             return (a.Kind == "garage" && !Ok(b.Kind)) || (b.Kind == "garage" && !Ok(a.Kind));
         }
 

@@ -138,6 +138,24 @@ export const deleteAnnotation = spacetimedb.reducer({ id: t.u64() }, (ctx, { id 
   ctx.db.annotation.id.delete(id);
 });
 
+export const addNote = spacetimedb.reducer(
+  { blueprintId: t.u32(), roomId: t.u32(), text: t.string(), source: t.string(), x: t.f32(), y: t.f32(), z: t.f32() },
+  (ctx, { blueprintId, roomId, text, source, x, y, z }) => {
+    const p = requireProfile(ctx);
+    const clean = text.trim().slice(0, 500);
+    if (!clean) throw new SenderError('Empty note');
+    ctx.db.note.insert({
+      id: 0n, blueprintId, roomId, authorName: p.name, color: p.color, text: clean,
+      source: source === 'voice' ? 'voice' : 'text', x, y, z, at: ctx.timestamp,
+    });
+  }
+);
+
+export const deleteNote = spacetimedb.reducer({ id: t.u64() }, (ctx, { id }) => {
+  requireProfile(ctx);
+  ctx.db.note.id.delete(id);
+});
+
 // ───────────────────────────── Execution: work orders ──────────────────────────────
 
 export const createWorkOrder = spacetimedb.reducer(
@@ -176,6 +194,7 @@ export const resetDemo = spacetimedb.reducer(ctx => {
   for (const w of [...ctx.db.workOrder.iter()]) ctx.db.workOrder.id.delete(w.id);
   for (const a of [...ctx.db.alert.iter()]) ctx.db.alert.id.delete(a.id);
   for (const a of [...ctx.db.annotation.iter()]) ctx.db.annotation.id.delete(a.id);
+  for (const n of [...ctx.db.note.iter()]) ctx.db.note.id.delete(n.id);
   for (const m of [...ctx.db.agentMessage.iter()]) ctx.db.agentMessage.id.delete(m.id);
   for (const s of [...ctx.db.agentStep.iter()]) ctx.db.agentStep.id.delete(s.id);
   for (const r of [...ctx.db.agentRun.iter()]) ctx.db.agentRun.id.delete(r.id);

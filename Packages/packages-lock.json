@@ -24,6 +24,13 @@
       },
       "hash": "e2fd09c71644d1d9fa1ae134526ce913cbf97536"
     },
+    "com.meta.xr.sdk.voice": {
+      "version": "85.0.1",
+      "depth": 0,
+      "source": "registry",
+      "dependencies": {},
+      "url": "https://npm.developer.oculus.com"
+    },
     "com.unity.2d.sprite": {
       "version": "1.0.0",
       "depth": 1,

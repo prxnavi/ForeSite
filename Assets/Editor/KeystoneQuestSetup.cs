@@ -101,6 +101,29 @@ namespace CbreTwin.EditorTools
             Debug.Log($"Keystone Quest build: {report.summary.result} ({report.summary.totalSize / (1024 * 1024)} MB)");
         }
 
+        /// <summary>
+        /// Headless build for the command line:
+        /// Unity -batchmode -quit -projectPath . -buildTarget Android -executeMethod CbreTwin.EditorTools.KeystoneQuestSetup.CommandLineBuild
+        /// Produces Builds/Keystone.apk (Maincloud config) and exits non-zero on failure.
+        /// </summary>
+        public static void CommandLineBuild()
+        {
+            Configure();
+            WriteConfig(TwinConnection.DefaultServer);
+            Directory.CreateDirectory("Builds");
+            var scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray();
+            if (scenes.Length == 0) scenes = new[] { "Assets/Scenes/SampleScene.unity" };
+            var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
+            {
+                scenes = scenes,
+                locationPathName = "Builds/Keystone.apk",
+                target = BuildTarget.Android,
+                options = BuildOptions.None,
+            });
+            Debug.Log($"Keystone Quest build: {report.summary.result} · {report.summary.totalErrors} errors · {report.summary.totalSize / (1024 * 1024)} MB");
+            if (Application.isBatchMode) EditorApplication.Exit(report.summary.result == UnityEditor.Build.Reporting.BuildResult.Succeeded ? 0 : 1);
+        }
+
         static void WriteConfig(string server)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath));

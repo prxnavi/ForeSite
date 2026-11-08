@@ -40,6 +40,7 @@ namespace Cascade
 
         Transform hudFrame, panelRoot;
         float posSendAt, followUntil, readyAt = -1;
+        Vector2 lastSent;
         bool sentAbsent;
         Vector2 standAt = new(1.5f, 8f), faceDir = new(1f, 0f);
 
@@ -60,6 +61,7 @@ namespace Cascade
             }
             SetupEventSystem();
             if (IsXR) HideRigClutter();
+            SetupLighting();
 
             Net = new CascadeNet(spacetimeUri, spacetimeDatabase);
             Voice = gameObject.AddComponent<VoiceInput>();
@@ -77,6 +79,7 @@ namespace Cascade
             Panel.Bind(Net, Twin, cam, Voice, IsXR);
             Panel.OverviewChanged += on => SetWalkIn(!on);
             Panel.XrayChanged += on => Twin.Xray = on;
+            Panel.StructureChanged += on => Twin.Structure = on;
             Panel.RecenterRequested += Recenter;
             Panel.TakeMeThere += GoTo;
 
@@ -85,8 +88,32 @@ namespace Cascade
             Issues.Bind(Net, Twin, cam);
             Panel.BindIssues(Issues);
 
+            var collab = new GameObject("Collab").AddComponent<CollabView>();
+            collab.transform.SetParent(transform, false);
+            collab.Bind(Net, Twin, cam);
+
             var orbs = new GameObject("AgentOrbs").AddComponent<AgentOrbs>();
             orbs.Bind(Net, Twin, cam, panelRoot);
+
+            // each headset gets its own name so two people can tell each other apart
+            if (IsXR && displayName == "Manager")
+            {
+                var id = SystemInfo.deviceUniqueIdentifier ?? "";
+                displayName = $"Quest {(id.Length >= 4 ? id.Substring(id.Length - 4).ToUpperInvariant() : Random.Range(1000, 9999).ToString())}";
+            }
+            if (IsXR)
+            {
+                var nav = gameObject.AddComponent<ZoomNav>();
+                nav.Bind(Twin, viewer, FloorY);
+                // remember where you zoomed to, so Recenter keeps you there
+                nav.Moved += () =>
+                {
+                    standAt = Twin.PlanPoint(viewer.position);
+                    var f = Twin.transform.InverseTransformDirection(Flat(viewer.forward));
+                    faceDir = new Vector2(f.x, f.z);
+                    Twin.RebuildTrail();
+                };
+            }
 
             Net.Connect(displayName, startRole);
             SetWalkIn(IsXR && startWalkIn);
@@ -99,6 +126,25 @@ namespace Cascade
             while (t < 2f && viewer.localPosition.sqrMagnitude < 1e-4f) { t += Time.deltaTime; yield return null; }
             yield return null;
             Recenter();
+        }
+
+        /// Soft architectural light for the lit interior (the look of the Keystone branch):
+        /// three-color ambient plus one sun, no shadows (cheap on Quest).
+        static void SetupLighting()
+        {
+            RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Trilight;
+            RenderSettings.ambientSkyColor = AtlasStyle.Hex("#F4F8FF");
+            RenderSettings.ambientEquatorColor = AtlasStyle.Hex("#E9E4F5");
+            RenderSettings.ambientGroundColor = AtlasStyle.Hex("#C9D7C3");
+            RenderSettings.ambientIntensity = 0.8f;
+            RenderSettings.fog = false;
+            var sun = FindFirstObjectByType<Light>();
+            if (!sun || sun.type != LightType.Directional) sun = new GameObject("Sun").AddComponent<Light>();
+            sun.type = LightType.Directional;
+            sun.color = AtlasStyle.Hex("#FFF4E5");
+            sun.intensity = 0.5f;
+            sun.shadows = LightShadows.None;
+            sun.transform.rotation = Quaternion.Euler(52, -35, 0);
         }
 
         static Vector3 Flat(Vector3 v)
@@ -149,6 +195,19 @@ namespace Cascade
         /// "Take me there": stand just inside the door of the target's room, facing it.
         void GoTo(string id)
         {
+            if (Twin.WallRow(id) != null)
+            {
+                // stand ~2.2 m from the middle of the wall, on the side that is inside the building
+                var (mid, n) = Twin.WallPlan(id);
+                var side = mid + n * 2.2f;
+                bool inside = side.x > 0.3f && side.x < Twin.Size.x - 0.3f && side.y > 0.3f && side.y < Twin.Size.y - 0.3f;
+                var stand = inside ? side : mid - n * 2.2f;
+                if (!Twin.LifeSize) { Twin.LifeSize = true; Panel.SyncOverview(false); }
+                PlaceAt(stand, mid - stand);
+                SnapPanel();
+                Twin.Selected = id;
+                return;
+            }
             var issue = Issues ? Issues.Row(id) : null;
             if (issue != null)
             {
@@ -224,6 +283,15 @@ namespace Cascade
                 if (t && (t.name.Contains("Teleport") || t.name.EndsWith("Controller Visual") || t.name == "TeleportUI"
                     || t.name.StartsWith("Pinch Visual") || t.name.StartsWith("Pinch_Pointer")))
                     t.gameObject.SetActive(false);
+            // The tracked-hand meshes ship with a URP-only material (renders magenta in this pipeline):
+            // give them a soft lit skin material that the build includes.
+            var skin = new Material(CascadeStyle.Lit(null, 0.3f)) { color = new Color(0.93f, 0.86f, 0.80f) };
+            foreach (var r in origin.GetComponentsInChildren<Renderer>(true))
+            {
+                var m = r.sharedMaterial;
+                if (m && (!m.shader.isSupported || m.shader.name.Contains("Error") || m.shader.name.Contains("Universal")))
+                    r.sharedMaterial = skin;
+            }
         }
 
         void Update()
@@ -251,8 +319,13 @@ namespace Cascade
 
             if (Net.Ready && Time.time > posSendAt)
             {
-                posSendAt = Time.time + 0.33f;
-                if (Twin.LifeSize && viewer) { Net.UpdatePosition(Twin.PlanPoint(viewer.position), true); sentAbsent = false; }
+                posSendAt = Time.time + 0.1f;
+                if (Twin.LifeSize && viewer)
+                {
+                    var p = Twin.PlanPoint(viewer.position);
+                    if (sentAbsent || (p - lastSent).sqrMagnitude > 0.0025f) { Net.UpdatePosition(p, true); lastSent = p; }
+                    sentAbsent = false;
+                }
                 else if (!sentAbsent) { Net.UpdatePosition(Vector2.zero, false); sentAbsent = true; }
             }
 
@@ -288,7 +361,7 @@ namespace Cascade
 
         static void AddTrackedRaycaster(Canvas c)
         {
-            if (!c.GetComponent<TrackedDeviceGraphicRaycaster>()) c.gameObject.AddComponent<TrackedDeviceGraphicRaycaster>();
+            if (!c.GetComponent<TrackedDeviceGraphicRaycaster>()) c.gameObject.AddComponent<PanelRaycaster>();
         }
     }
 }

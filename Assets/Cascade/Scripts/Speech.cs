@@ -16,6 +16,7 @@ namespace Cascade
             public void onInit(int status)
             {
                 ready = status == 0;
+                if (ready) { try { tts.Call<int>("setSpeechRate", 1.2f); } catch { } }
                 if (ready && pending != null) { var p = pending; pending = null; Say(p); }
             }
         }

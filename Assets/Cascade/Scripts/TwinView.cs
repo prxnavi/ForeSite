@@ -21,6 +21,9 @@ namespace Cascade
         public float Hour;              // displayed timeline hour (0..24)
         public string Label = "do_nothing";
         public bool Xray;
+        /// Structure view: walls colored by type and load; proposals drawn in place.
+        public bool Structure;
+        public event Action<string> WallPicked;
         public bool LifeSize;
         public string Selected;
         /// Where the guide trail starts (your spot on the plan in walk-in mode).
@@ -33,9 +36,9 @@ namespace Cascade
         bool built, buildAnimating;
         float buildT;
 
-        class RoomVis { public Net.Room row; public Renderer floor; public TextMeshPro name, temp, sign; public GameObject ceiling; }
+        class RoomVis { public Net.Room row; public Renderer floor; public TextMeshPro name, temp, sign; public GameObject ceiling; public Material litFloor; public Renderer ceilR; }
         class AssetVis { public Net.Asset row; public Transform root; public Renderer body, light; public TextMeshPro label; }
-        class WallVis { public Transform t; public Renderer r; public float delay; public Transform rail, foot; public Renderer railR, footR; }
+        class WallVis { public Transform t; public Renderer r; public float delay; public Transform rail, foot; public Renderer railR, footR; public bool h; public float c, a0, a1; public string wallId; }
         class Seg { public Renderer r; public string from; public string kind; }
 
         readonly Dictionary<string, RoomVis> rooms = new();
@@ -45,9 +48,10 @@ namespace Cascade
         readonly List<Renderer> thread = new();
         readonly List<Renderer> trail = new();
         readonly Dictionary<string, Transform> people = new();
+        readonly Dictionary<string, Vector3> peopleGoal = new();
         readonly HashSet<string> highlight = new();
         readonly Dictionary<string, float> pulseUntil = new();
-        Transform staticRoot, fxRoot, peopleRoot;
+        Transform staticRoot, fxRoot, peopleRoot, interior;
         GameObject slab;
         Transform threadBead;
         List<Vector3> threadPts = new();
@@ -106,6 +110,9 @@ namespace Cascade
                 var floor = CascadeStyle.Cube(staticRoot, "Floor " + r.Id, L((r.X0 + r.X1) / 2, (r.Z0 + r.Z1) / 2, 0.03f),
                     new Vector3(w - 0.08f, 0.06f, d - 0.08f), CascadeStyle.Flat, collider: r.Kind != "corridor");
                 v.floor = floor.GetComponent<Renderer>();
+                var ftex = FloorTexture(r);
+                v.litFloor = CascadeStyle.Lit(ftex, r.Kind == "common" ? 0.45f : 0.12f);
+                CascadeStyle.Tile(v.floor, w, d, ProcTex.RepeatMeters(ftex));
                 if (r.Kind != "corridor") floor.AddComponent<Pick>().Init(this, r.Id, false);
                 bool small = r.Kind == "corridor";
                 v.name = MakeLabel(staticRoot, r.Name, small ? 3f : 4.6f, CascadeStyle.Ink, L((r.X0 + r.X1) / 2, (r.Z0 + r.Z1) / 2 + (small ? 0 : 0.35f), 0.08f),
@@ -122,8 +129,10 @@ namespace Cascade
                 // walk-through interior: a ceiling with a light panel (hidden on the tabletop)
                 v.ceiling = new GameObject("Ceiling " + r.Id);
                 v.ceiling.transform.SetParent(staticRoot, false);
-                var ceil = CascadeStyle.Cube(v.ceiling.transform, "Tiles", L((r.X0 + r.X1) / 2, (r.Z0 + r.Z1) / 2, 2.72f), new Vector3(w, 0.04f, d), CascadeStyle.Solid);
-                CascadeStyle.Tint(ceil.GetComponent<Renderer>(), AtlasStyle.Hex("#E9EBEE"), new Color(0.06f, 0.06f, 0.06f, 0));
+                var ceil = CascadeStyle.Cube(v.ceiling.transform, "Tiles", L((r.X0 + r.X1) / 2, (r.Z0 + r.Z1) / 2, 2.72f), new Vector3(w, 0.04f, d), CascadeStyle.Lit(ProcTex.Kind.Plaster, 0.05f));
+                v.ceilR = ceil.GetComponent<Renderer>();
+                CascadeStyle.Tile(v.ceilR, w, d, 2.5f);
+                CascadeStyle.Tint(v.ceilR, AtlasStyle.Hex("#F4F2EE"));
                 int lights = Mathf.Max(1, Mathf.RoundToInt(w * d / 18f));
                 for (int k = 0; k < lights; k++)
                 {
@@ -153,6 +162,8 @@ namespace Cascade
                 v.label.alignment = TextAlignmentOptions.Bottom;
                 assets[a.Id] = v;
             }
+
+            interior = InteriorDecor.Build(this, staticRoot, roomRows, net.Db.Asset.Iter().ToList(), Size);
 
             // X-ray: pipes and ducts from the dependency graph, at ceiling height
             foreach (var d in net.Db.Dependency.Iter())
@@ -211,13 +222,23 @@ namespace Cascade
                     float len = s.y - s.x, mid = (s.x + s.y) / 2;
                     var pos = key.h ? L(mid, key.c) : L(key.c, mid);
                     var size = key.h ? new Vector3(len + 0.15f, 1, 0.15f) : new Vector3(0.15f, 1, len + 0.15f);
-                    var go = CascadeStyle.Cube(staticRoot, "Wall", pos, size, CascadeStyle.WallMat);
+                    var go = CascadeStyle.Cube(staticRoot, "Wall", pos, size, CascadeStyle.WallMat, collider: true);
                     var railSize = key.h ? new Vector3(len + 0.15f, 0.07f, 0.17f) : new Vector3(0.17f, 0.07f, len + 0.15f);
                     var rail = CascadeStyle.Cube(staticRoot, "Rail", pos, railSize, CascadeStyle.Glow);
                     var footSize = key.h ? new Vector3(len + 0.15f, 0.1f, 0.18f) : new Vector3(0.18f, 0.1f, len + 0.15f);
                     var foot = CascadeStyle.Cube(staticRoot, "Baseboard", pos + Vector3.up * 0.05f, footSize, CascadeStyle.Solid);
-                    walls.Add(new WallVis { t = go.transform, r = go.GetComponent<Renderer>(), delay = (pos.magnitude / 14f) + (i++ % 5) * 0.03f,
-                        rail = rail.transform, railR = rail.GetComponent<Renderer>(), foot = foot.transform, footR = foot.GetComponent<Renderer>() });
+                    CascadeStyle.Tile(go.GetComponent<Renderer>(), len, 2.7f, 2.5f);
+                    var wv = new WallVis { t = go.transform, r = go.GetComponent<Renderer>(), delay = (pos.magnitude / 14f) + (i++ % 5) * 0.03f,
+                        rail = rail.transform, railR = rail.GetComponent<Renderer>(), foot = foot.transform, footR = foot.GetComponent<Renderer>(),
+                        h = key.h, c = key.c, a0 = s.x, a1 = s.y };
+                    // which structural wall (server row) this segment belongs to
+                    var mid2 = (s.x + s.y) / 2;
+                    var row = net.Db.Wall.Iter().FirstOrDefault(wr => key.h
+                        ? Mathf.Abs(wr.Z0 - wr.Z1) < 0.01f && Mathf.Abs(wr.Z0 - key.c) < 0.05f && mid2 > Mathf.Min(wr.X0, wr.X1) && mid2 < Mathf.Max(wr.X0, wr.X1)
+                        : Mathf.Abs(wr.X0 - wr.X1) < 0.01f && Mathf.Abs(wr.X0 - key.c) < 0.05f && mid2 > Mathf.Min(wr.Z0, wr.Z1) && mid2 < Mathf.Max(wr.Z0, wr.Z1));
+                    wv.wallId = row?.Id;
+                    if (row != null) go.AddComponent<WallPick>().Init(this, row.Id);
+                    walls.Add(wv);
                 }
             }
         }
@@ -361,6 +382,7 @@ namespace Cascade
             float wallH = LifeSize ? 2.72f : 1.25f;
 
             if (slab) slab.SetActive(!LifeSize);
+            if (interior) interior.gameObject.SetActive(built && !Xray && (!buildAnimating || buildT > 2.2f));
             // walls rise out of the blueprint
             foreach (var w in walls)
             {
@@ -372,7 +394,27 @@ namespace Cascade
                 // walk-through: solid painted walls (x-ray turns them to glass)
                 var c = built ? (LifeSize ? (Xray ? AtlasStyle.Hex("#E0F2FE").A(0.08f) : AtlasStyle.Hex("#ECEEF1")) : CascadeStyle.Wall.A(Xray ? 0.08f : 0.85f)) : CascadeStyle.Blueprint.A(0.95f);
                 // vertical faces are shaded darker by the shader; lift interior walls so they read as bright paint
-                CascadeStyle.Tint(w.r, c, !built ? CascadeStyle.Blueprint * 0.3f : LifeSize && !Xray ? new Color(0.3f, 0.3f, 0.31f, 0) : Color.clear);
+                Color emit = !built ? CascadeStyle.Blueprint * 0.3f : LifeSize && !Xray ? new Color(0.3f, 0.3f, 0.31f, 0) : Color.clear;
+                var wr = w.wallId != null ? net.Db.Wall.Id.Find(w.wallId) : null;
+                if (built && wr != null)
+                {
+                    if (Structure) { c = StructureColor(wr, t); emit = c * 0.25f; }
+                    if (wr.Proposal == "remove")
+                    {
+                        // the wall being questioned: ghosted red; gone once the change is approved
+                        float pulse = 0.5f + 0.5f * Mathf.Sin(t * 3f);
+                        c = wr.ProposalState == "approved" ? c.A(0f) : CascadeStyle.Danger.A(0.25f + 0.15f * pulse);
+                        emit = CascadeStyle.Danger * 0.2f * pulse;
+                    }
+                    if (Selected == w.wallId) emit += new Color(0.25f, 0.25f, 0.25f, 0);
+                }
+                w.r.enabled = c.a > 0.01f;
+                // lit plaster when it's just a wall; flat colors for blueprint, x-ray, structure view and proposals
+                bool plain = built && !Xray && !Structure && !(wr != null && wr.Proposal == "remove");
+                var want = plain ? CascadeStyle.Lit(ProcTex.Kind.Plaster, 0.05f) : CascadeStyle.WallMat;
+                if (w.r.sharedMaterial != want) w.r.sharedMaterial = want;
+                if (plain) { c = AtlasStyle.Hex("#F7F5F1"); emit = Color.clear; if (Selected == w.wallId) c = AtlasStyle.Hex("#E0F2FE"); }
+                CascadeStyle.Tint(w.r, c, emit);
                 w.rail.localPosition = new Vector3(p.x, h, p.z);
                 w.rail.gameObject.SetActive(built && !LifeSize);
                 w.foot.gameObject.SetActive(built && LifeSize);
@@ -380,6 +422,8 @@ namespace Cascade
                 CascadeStyle.Tint(w.railR, railC, CascadeStyle.Accent * 0.15f);
                 CascadeStyle.Tint(w.footR, AtlasStyle.Hex("#6B7280"));
             }
+
+            UpdateBeams(wallH, built, t);
 
             foreach (var r in rooms.Values)
             {
@@ -391,15 +435,18 @@ namespace Cascade
                 bool down = cooled && !float.IsNaN(temp) && temp > row.LimitTemp;
                 float glow = (highlight.Contains(row.Id) ? 0.12f + 0.08f * Mathf.Sin(t * 4f) : 0f) + (Selected == row.Id ? 0.12f : 0f)
                              + (down ? 0.1f * (0.5f + 0.5f * Mathf.Sin(t * 5f)) : 0f);
+                var wantFloor = built ? r.litFloor : CascadeStyle.Flat;
+                if (r.floor.sharedMaterial != wantFloor) r.floor.sharedMaterial = wantFloor;
                 if (!built) c = CascadeStyle.Blueprint.A(0.12f);
-                else if (LifeSize)
+                else
                 {
                     // walk-through: real floor finishes, warming toward amber/red as heat spreads
                     float heat = cooled && !float.IsNaN(temp) ? Mathf.Clamp01((temp - row.StartTemp) / Mathf.Max(1f, row.LimitTemp - row.StartTemp)) : 0f;
-                    var finish = AtlasStyle.Hex(row.Kind switch { "office" => "#CFCAC2", "server" => "#C3CAD2", "mech" => "#A8AEB5", "corridor" => "#D5D9DE", _ => "#DCD6CC" });
+                    var finish = Color.white; // the texture carries the finish; heat tints it
                     c = down ? Color.Lerp(finish, CascadeStyle.FloorDown, 0.75f) : heat > 0.02f ? Color.Lerp(finish, heat < 0.5f ? CascadeStyle.FloorWarm : CascadeStyle.FloorHot, Mathf.Clamp01(heat * 1.4f)) : finish;
                 }
                 if (r.ceiling) r.ceiling.SetActive(built && LifeSize && !Xray);
+                if (r.ceilR) CascadeStyle.Tint(r.ceilR, AtlasStyle.Hex("#F4F2EE"));
                 CascadeStyle.Tint(r.floor, c, Color.white * glow);
                 r.name.color = built ? CascadeStyle.Ink : CascadeStyle.Blueprint;
                 r.name.gameObject.SetActive(!LifeSize || !built);
@@ -468,7 +515,12 @@ namespace Cascade
                 CascadeStyle.Tint(trail[i], Color.Lerp(CascadeStyle.Accent, Color.white, w * 0.6f).A(0.95f), CascadeStyle.Accent * (0.2f + 0.5f * w));
             }
 
-            foreach (var p in people.Values) if (p) Billboard(p.Find("Label"));
+            foreach (var (k, p) in people)
+            {
+                if (!p) continue;
+                if (peopleGoal.TryGetValue(k, out var g)) p.localPosition = Vector3.Lerp(p.localPosition, g, Time.deltaTime * 10f); // glide between 10 Hz updates
+                Billboard(p.Find("Label"));
+            }
         }
 
         void Billboard(Transform t)
@@ -530,7 +582,8 @@ namespace Cascade
                     lbl.name = "Label";
                     people[key] = tr;
                 }
-                tr.localPosition = L(u.X, u.Z, 0.02f);
+                if (!peopleGoal.ContainsKey(key)) tr.localPosition = L(u.X, u.Z, 0.02f);
+                peopleGoal[key] = L(u.X, u.Z, 0.02f);
                 var dotT = tr.Find("Dot");
                 dotT.localPosition = new Vector3(0, LifeSize ? 1.75f : 1.2f, 0);
                 dotT.localScale = Vector3.one * (LifeSize ? 0.12f : 0.6f);
@@ -540,7 +593,7 @@ namespace Cascade
                 CascadeStyle.Tint(dotT.GetComponent<Renderer>(), CascadeStyle.Accent, CascadeStyle.Accent * 0.4f);
                 tr.Find("Label").GetComponent<TextMeshPro>().text = $"{u.Name} · {(u.Role == "technician" ? "Technician" : "Manager")}";
             }
-            foreach (var k in people.Keys.ToList()) if (!keep.Contains(k)) { if (people[k]) Destroy(people[k].gameObject); people.Remove(k); }
+            foreach (var k in people.Keys.ToList()) if (!keep.Contains(k)) { if (people[k]) Destroy(people[k].gameObject); people.Remove(k); peopleGoal.Remove(k); }
         }
 
         public void OnPick(string id, bool isAsset)
@@ -550,6 +603,94 @@ namespace Cascade
         }
 
         /// Pointer target on rooms and assets (mouse, hand pinch or controller ray).
+        static ProcTex.Kind FloorTexture(Net.Room r) => r.Kind switch
+        {
+            "office" => ProcTex.Kind.Carpet,
+            "server" => ProcTex.Kind.LargeTile,
+            "mech" => ProcTex.Kind.Concrete,
+            "corridor" => ProcTex.Kind.Tile,
+            _ => r.Id == "LOBBY" ? ProcTex.Kind.Marble : ProcTex.Kind.Wood,
+        };
+
+        // ---------------- structure ----------------
+
+        public static Color StructureColor(Net.Wall w, float t)
+        {
+            if (w.Health == "damaged") return Color.Lerp(AtlasStyle.Hex("#EF4444"), AtlasStyle.Hex("#7F1D1D"), 0.5f + 0.5f * Mathf.Sin(t * 4f));
+            if (w.Kind == "partition") return AtlasStyle.Hex("#E5E7EB").A(0.45f);
+            if (w.Kind == "exterior") return AtlasStyle.Hex("#64748B");
+            return w.Utilization < 0.5f ? AtlasStyle.Hex("#3B82F6") : w.Utilization < 0.68f ? AtlasStyle.Hex("#F59E0B") : AtlasStyle.Hex("#EF4444");
+        }
+
+        public static string WallKindLabel(Net.Wall w) => w.Kind switch { "exterior" => "Exterior · load-bearing", "bearing" => "Load-bearing", _ => "Partition (non-structural)" };
+
+        public Net.Wall WallRow(string id) => net?.Db?.Wall.Id.Find(id);
+
+        /// Midpoint and a unit normal of a wall, in plan meters.
+        public (Vector2 mid, Vector2 normal) WallPlan(string id)
+        {
+            var w = WallRow(id);
+            if (w == null) return (center, Vector2.up);
+            var mid = new Vector2((w.X0 + w.X1) / 2, (w.Z0 + w.Z1) / 2);
+            var dir = new Vector2(w.X1 - w.X0, w.Z1 - w.Z0).normalized;
+            return (mid, new Vector2(-dir.y, dir.x));
+        }
+
+        public Vector3 WallWorld(string id, float y)
+        {
+            var (mid, _) = WallPlan(id);
+            return transform.TransformPoint(L(mid.x, mid.y, y));
+        }
+
+        readonly Dictionary<string, Transform> beams = new();
+
+        /// Proposed load-bearing removals show the replacement: a steel beam on two posts.
+        void UpdateBeams(float wallH, bool built, float t)
+        {
+            if (net?.Db == null || !staticRoot) return;
+            foreach (var w in net.Db.Wall.Iter())
+            {
+                bool show = built && w.Proposal == "remove" && w.Kind != "partition" && w.ProposalState is "evaluating" or "recommended" or "approved";
+                beams.TryGetValue(w.Id, out var root);
+                if (!show) { if (root) root.gameObject.SetActive(false); continue; }
+                if (!root)
+                {
+                    root = new GameObject("Beam " + w.Id).transform;
+                    root.SetParent(staticRoot, false);
+                    var a = L(w.X0, w.Z0); var b = L(w.X1, w.Z1);
+                    var beam = CascadeStyle.Cube(root, "Beam", (a + b) / 2, new Vector3(0.22f, 0.36f, Vector3.Distance(a, b)), CascadeStyle.Solid);
+                    beam.transform.localRotation = Quaternion.LookRotation(b - a, Vector3.up);
+                    var dir = (b - a).normalized;
+                    CascadeStyle.Cube(root, "Post A", a + dir * 0.3f, new Vector3(0.2f, 1, 0.2f), CascadeStyle.Solid);
+                    CascadeStyle.Cube(root, "Post B", b - dir * 0.3f, new Vector3(0.2f, 1, 0.2f), CascadeStyle.Solid);
+                    beams[w.Id] = root;
+                }
+                root.gameObject.SetActive(true);
+                var steel = w.ProposalState == "approved" ? AtlasStyle.Hex("#F59E0B") : AtlasStyle.Hex("#F59E0B").A(0.55f + 0.25f * Mathf.Sin(t * 3f));
+                foreach (Transform part in root)
+                {
+                    var p = part.localPosition;
+                    if (part.name == "Beam") { p.y = wallH - 0.18f; }
+                    else { var sc = part.localScale; sc.y = wallH - 0.36f; part.localScale = sc; p.y = sc.y / 2; }
+                    part.localPosition = p;
+                    CascadeStyle.Tint(part.GetComponent<Renderer>(), steel, AtlasStyle.Hex("#F59E0B") * 0.25f);
+                }
+            }
+        }
+
+        public void OnWallPick(string id)
+        {
+            Selected = Selected == id ? null : id;
+            WallPicked?.Invoke(Selected);
+        }
+
+        public class WallPick : MonoBehaviour, IPointerClickHandler
+        {
+            TwinView view; string id;
+            public void Init(TwinView v, string i) { view = v; id = i; }
+            public void OnPointerClick(PointerEventData e) => view.OnWallPick(id);
+        }
+
         public class Pick : MonoBehaviour, IPointerClickHandler
         {
             TwinView view; string id; bool asset;

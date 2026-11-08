@@ -19,6 +19,7 @@ namespace Cascade
     {
         public event Action<bool> OverviewChanged;
         public event Action<bool> XrayChanged;
+        public event Action<bool> StructureChanged;
         public event Action RecenterRequested;
         public event Action<string> TakeMeThere;
 
@@ -53,10 +54,10 @@ namespace Cascade
         readonly List<(Button b, TextMeshProUGUI t)> actRows = new();
         readonly List<ulong> actIds = new();
         // dock
-        Button walkBtn, mapBtn, techBtn, mgrBtn, xrayBtn; bool xray;
+        Button walkBtn, mapBtn, techBtn, mgrBtn, xrayBtn, structBtn, metricsBtn; bool xray, structure;
         // card
-        Canvas card; TextMeshProUGUI cardSub, cardTitle, cardBody; Button cardSend, cardGo; TextMeshProUGUI cardSendText; string cardId; string cardKind = "asset";
-        IssueView issues; GameObject findRoot, issuesRoot; TextMeshProUGUI issuesCaps;
+        Canvas card; TextMeshProUGUI cardSub, cardTitle, cardBody; Button cardSend, cardGo; TextMeshProUGUI cardSendText, cardGoText; string cardId; string cardKind = "asset";
+        IssueView issues; GameObject findRoot, issuesRoot, metricsRoot; TextMeshProUGUI issuesCaps, metricsText; bool showMetrics;
         readonly List<(Button b, TextMeshProUGUI t)> issueRows = new(); readonly List<string> issueIds = new();
 
         int seenVersion = -1;
@@ -80,6 +81,10 @@ namespace Cascade
             BuildRight(findRoot.transform);
             issuesRoot = Container(shift, "Issues");
             BuildIssues(issuesRoot.transform);
+            metricsRoot = Container(shift, "Metrics");
+            CUi.Caps(metricsRoot.transform, "How well it works · live from SpacetimeDB", CUi.Accent, 548, 24, 480);
+            metricsText = CUi.Text(metricsRoot.transform, "", 13, CUi.Ink, 548, 48, 488, 640);
+            metricsText.richText = true;
             Left = lc.transform; Right = rc.transform;
             ((RectTransform)Left).pivot = new Vector2(0.5f, 1f);   // poses refer to the top edge
             ((RectTransform)Right).pivot = new Vector2(0.5f, 1f);
@@ -107,14 +112,14 @@ namespace Cascade
             micHint = CUi.Text(talk.transform, "Hold the button and speak", 13, CUi.Accent, 120, 16, 360, 18, FontStyles.Bold);
             transcript = CUi.Text(talk.transform, "“Anything I should worry about?”", 18, CUi.Ink, 120, 38, 360, 62);
 
-            string[] q = { "Anything to worry about?", "If Chiller 2 fails?", "Who's at risk?" };
-            string[] full = { "Anything I should worry about?", "What happens if Chiller 2 fails tonight?", "Which tenants are at risk tonight?" };
+            string[] q = { "Anything to worry about?", "Structurally sound?", "Remove a wall?" };
+            string[] full = { "Anything I should worry about?", "Is the building structurally sound?", "" };
             float x = 24;
             for (int i = 0; i < q.Length; i++)
             {
                 float w = i == 0 ? 210 : 138;
                 int k = i;
-                var (b, _) = CUi.Button(p, q[i], CUi.Style.Secondary, () => Ask(full[k]), x, 208, w, 36, 13);
+                var (b, _) = CUi.Button(p, q[i], CUi.Style.Secondary, () => { if (full[k].Length > 0) Ask(full[k]); else PickAWall(); }, x, 208, w, 36, 13);
                 chips.Add(b);
                 x += w + 6;
             }
@@ -126,11 +131,11 @@ namespace Cascade
             for (int i = 0; i < CascadeStyle.Agents.Length; i++)
             {
                 var a = CascadeStyle.Agents[i];
-                float ax = 26 + i * 70;
-                var ring = UiKit.Box(p, "Ring", CascadeStyle.AgentColor(a), 1.3f).At(ax + 6, 290, 54, 54);
-                var fill = UiKit.Box(ring.transform, "Fill", Color.white, 1.25f).At(4, 4, 46, 46);
+                float ax = 24 + i * 61;
+                var ring = UiKit.Box(p, "Ring", CascadeStyle.AgentColor(a), 1.3f).At(ax + 6, 290, 50, 50);
+                var fill = UiKit.Box(ring.transform, "Fill", Color.white, 1.2f).At(4, 4, 42, 42);
                 var ini = UiKit.Text(fill.transform, Initials(a), 15, CUi.Ink, FontStyles.Bold, TextAlignmentOptions.Center).Stretch();
-                var name = CUi.Text(p, ShortName(a), 10, CUi.InkMid, ax - 4, 348, 74, 14, FontStyles.Bold, TextAlignmentOptions.Top);
+                var name = CUi.Text(p, ShortName(a), 10, CUi.InkMid, ax - 4, 344, 70, 14, FontStyles.Bold, TextAlignmentOptions.Top);
                 avatars[a] = (ring, fill, ini, name);
             }
             var now = CUi.Card(p, CUi.Surface, 24, 372, 492, 72, 0.5f);
@@ -244,6 +249,7 @@ namespace Cascade
         {
             issues = v;
             issues.Picked += id => { cardId = id; cardKind = "issue"; RefreshCard(); };
+            twin.WallPicked += id => { cardId = id; cardKind = "wall"; RefreshCard(); };
         }
 
         void BuildIssues(Transform p)
@@ -282,11 +288,42 @@ namespace Cascade
             }
         }
 
+        void RefreshMetrics()
+        {
+            var m = net.Db.Metric.Iter().ToDictionary(x => x.Key);
+            string Pct(string k) => m.TryGetValue(k, out var x) ? $"{x.Value * 100:0}%" : "–";
+            string Val(string k) => !m.TryGetValue(k, out var x) ? "–" : x.Unit switch
+            {
+                "ratio" => $"{x.Value * 100:0}%", "ms" => $"{x.Value:0.#} ms", "runs/s" => $"{x.Value:N0}/s", _ => $"{x.Value:0.##} {x.Unit}",
+            };
+            string Det(string k) => m.TryGetValue(k, out var x) ? x.Detail : "";
+            string Row(string label, string value, string detail = "") =>
+                $"{label}<pos=72%><b>{value}</b></pos>\n" + (detail.Length > 0 ? $"<size=80%><color=#{CUi.Hex(CUi.InkLo)}>{detail}</color></size>\n" : "");
+            string Head(string h) => $"\n<size=85%><color=#{CUi.Hex(CUi.Accent)}><b>{h.ToUpperInvariant()}</b></color></size>\n";
+            var sb = new System.Text.StringBuilder();
+            sb.Append(Head("Reasoning on the blueprint · 15-case benchmark"));
+            sb.Append(Row("Framing-aware agents", Pct("eval.solver.accuracy"), Det("eval.solver.accuracy")));
+            sb.Append(Row("Plan-only baseline", Pct("eval.plan_only.accuracy"), Det("eval.plan_only.accuracy")));
+            if (m.ContainsKey("eval.agent.accuracy")) sb.Append(Row("Nemotron agent, end to end", Pct("eval.agent.accuracy"), Det("eval.agent.accuracy")));
+            sb.Append(Row("Load-bearing walls found", $"{Pct("structure.solver.recall")} vs {Pct("structure.plan_only.recall")}", "framing-aware vs plan-only"));
+            sb.Append(Head("Grounding"));
+            sb.Append(Row("Evidence citing a real row", m.ContainsKey("grounding.cited") ? Pct("grounding.cited") : "100%", "rejected at insert otherwise"));
+            if (m.ContainsKey("grounding.rejection_rate")) sb.Append(Row("Bad claims caught", Val("grounding.rejection_rate"), Det("grounding.tool_calls")));
+            if (m.ContainsKey("agents.llm_p50_ms")) sb.Append(Row("Nemotron latency", Val("agents.llm_p50_ms"), Det("agents.llm_p50_ms")));
+            sb.Append(Head("SpacetimeDB backend"));
+            sb.Append(Row("Reducer → live update", Val("backend.rtt_p50"), Det("backend.rtt_p50")));
+            sb.Append(Row("HTTP sensor ingest", Val("backend.http_ingest_p50"), Det("backend.http_ingest_p50")));
+            sb.Append(Row("Cascade simulations", Val("backend.sim_per_sec"), "inside the database"));
+            sb.Append(Row("50-run Monte Carlo", Val("backend.risk_ms"), "one transaction"));
+            sb.Append(Row("Every wall's removal sized", Val("backend.struct_ms"), Det("backend.struct_ms")));
+            metricsText.text = sb.ToString();
+        }
+
         static int SevRank(string s) => s switch { "critical" => 0, "high" => 1, "medium" => 2, _ => 3 };
 
         void BuildDock(bool showRecenter)
         {
-            var c = UiKit.WorldCanvas("Dock", transform, new Vector2(W, 64), cam);
+            var c = UiKit.WorldCanvas("Dock", transform, new Vector2(1130, 64), cam);
             c.transform.localScale = Vector3.one * Scale;
             Dock = c.transform;
             var p = CUi.Panel(c.transform, "Dock", 0.8f);
@@ -296,24 +333,32 @@ namespace Cascade
             CUi.Caps(p, "I am", CUi.InkLo, 306, 23, 40, 10);
             techBtn = CUi.Button(p, "Technician", CUi.Style.Secondary, () => net.SetRole("technician"), 346, 10, 128, 44, 14).b;
             mgrBtn = CUi.Button(p, "Manager", CUi.Style.Secondary, () => net.SetRole("manager"), 478, 10, 110, 44, 14).b;
-            xrayBtn = CUi.Button(p, "X-ray", CUi.Style.Secondary, () => { xray = !xray; XrayChanged?.Invoke(xray); }, 612, 10, 96, 44, 14).b;
-            float x = 712;
-            if (showRecenter) { CUi.Button(p, "Recenter", CUi.Style.Secondary, () => RecenterRequested?.Invoke(), x, 10, 112, 44, 14); x += 116; }
-            CUi.Button(p, "Start over", CUi.Style.Ghost, () => { net.ResetDemo(); playing = false; cardId = null; }, x, 10, 120, 44, 14);
+            structBtn = CUi.Button(p, "Structure", CUi.Style.Secondary, () => SetStructure(!structure), 600, 10, 108, 44, 14).b;
+            xrayBtn = CUi.Button(p, "X-ray", CUi.Style.Secondary, () => { xray = !xray; XrayChanged?.Invoke(xray); }, 712, 10, 80, 44, 14).b;
+            float x = 796;
+            if (showRecenter) { CUi.Button(p, "Recenter", CUi.Style.Secondary, () => RecenterRequested?.Invoke(), x, 10, 104, 44, 14); x += 108; }
+            metricsBtn = CUi.Button(p, "Metrics", CUi.Style.Secondary, () => { showMetrics = !showMetrics; seenVersion = -1; }, x, 10, 96, 44, 14).b; x += 100;
+            CUi.Button(p, "Start over", CUi.Style.Ghost, () => { net.ResetDemo(); playing = false; cardId = null; }, x, 10, 110, 44, 14);
         }
 
         void BuildCard()
         {
             card = UiKit.WorldCanvas("Card", null, new Vector2(440, 300), cam);
             var p = CUi.Panel(card.transform, "Card");
-            cardSub = CUi.Caps(p, "", CUi.Accent, 22, 18, 340);
-            cardTitle = CUi.Text(p, "", 24, CUi.Ink, 22, 38, 360, 32, FontStyles.Bold);
+            cardSub = CUi.Caps(p, "", CUi.Accent, 22, 18, 240);
+            cardTitle = CUi.Text(p, "", 24, CUi.Ink, 22, 50, 396, 32, FontStyles.Bold);
             CUi.Button(p, "×", CUi.Style.Ghost, () => { twin.Selected = null; cardId = null; RefreshCard(); }, 388, 12, 40, 40, 22);
-            cardBody = CUi.Text(p, "", 15, CUi.InkMid, 22, 76, 396, 150);
-            (cardGo, _) = CUi.Button(p, "Take me there", CUi.Style.Primary, () => { if (cardId != null) TakeMeThere?.Invoke(cardId); }, 22, 238, 190, 44, 14);
+            CUi.Button(p, "Ping team", CUi.Style.Secondary, () => { if (cardId != null) net.SendPing(cardId, "look"); }, 270, 12, 112, 34, 12);
+            cardBody = CUi.Text(p, "", 15, CUi.InkMid, 22, 86, 396, 146);
+            (cardGo, cardGoText) = CUi.Button(p, "Take me there", CUi.Style.Primary, () =>
+            {
+                if (cardId == null) return;
+                if (cardKind == "wall") net.ProposeWallRemoval(cardId); else TakeMeThere?.Invoke(cardId);
+            }, 22, 238, 190, 44, 14);
             (cardSend, cardSendText) = CUi.Button(p, "Send technician", CUi.Style.Secondary, () =>
             {
                 if (cardId == null) return;
+                if (cardKind == "wall") { TakeMeThere?.Invoke(cardId); return; }
                 if (cardKind == "issue") { var i = net.Db.Issue.Id.Find(cardId); if (i != null) Ask($"What should we do about the {i.Title.ToLowerInvariant()}?"); }
                 else net.SendTech(cardId);
             }, 220, 238, 198, 44, 14);
@@ -324,6 +369,15 @@ namespace Cascade
 
         void Ask(string text) { net.Ask(text); transcript.text = $"“{text}”"; }
         void SetOverview(bool on) { Overview = on; OverviewChanged?.Invoke(on); }
+        void SetStructure(bool on) { structure = on; StructureChanged?.Invoke(on); }
+
+        /// "Remove a wall?": switch to the structure view and invite a tap on any wall.
+        void PickAWall()
+        {
+            SetStructure(true);
+            transcript.text = "Tap any wall. Blue walls are load-bearing (amber and red are heavily loaded), grey ones are partitions.";
+            Speech.Say("Tap any wall to see if it can come out.");
+        }
         /// Keep the dock in sync when the app changes mode itself (e.g. Take me there).
         public void SyncOverview(bool on) => Overview = on;
 
@@ -369,6 +423,13 @@ namespace Cascade
             if (t.Contains("overview") || t.Contains("show the map")) { SetOverview(true); return; }
             if (t.Contains("walk in") || t.Contains("life size")) { SetOverview(false); return; }
             if (t.Contains("x-ray") || t.Contains("x ray") || t.Contains("see through")) { xray = !xray; XrayChanged?.Invoke(xray); return; }
+            var noteMatch = System.Text.RegularExpressions.Regex.Match(text, @"^\s*(private\s+)?note[:,]?\s+(.+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (noteMatch.Success) { net.AddNote(cardId ?? "", noteMatch.Groups[2].Value, noteMatch.Groups[1].Success); transcript.text = $"Noted{(noteMatch.Groups[1].Success ? " (only you can see it)" : " for the team")}: “{noteMatch.Groups[2].Value}”"; return; }
+            if (t.Contains("look here") || t.Contains("ping")) { net.SendPing(cardId ?? "", "look"); return; }
+            if (t.Contains("come here")) { net.SendPing(cardId ?? "", "come"); return; }
+            if (t.Contains("metrics") || t.Contains("how well")) { showMetrics = true; seenVersion = -1; return; }
+            if (t.Contains("structure view") || t.Contains("show the structure") || t.Contains("load bearing") || t.Contains("load-bearing")) { SetStructure(true); return; }
+            if (t.Contains("remove") && t.Contains("this wall") && cardKind == "wall" && cardId != null) { net.ProposeWallRemoval(cardId); return; }
             if (t.Contains("start over") || t.Contains("reset")) { net.ResetDemo(); return; }
             net.Ask(text);
         }
@@ -401,6 +462,7 @@ namespace Cascade
                 VoiceInput.State.Loading => "Loading on-device speech…",
                 VoiceInput.State.Listening => "Listening… release to send",
                 VoiceInput.State.Transcribing => "Understanding…",
+                VoiceInput.State.Ready when voice.LastMs > 0 => $"Hold the button and speak · last heard in {voice.LastMs / 1000f:0.0} s",
                 VoiceInput.State.Unavailable => "Voice unavailable · use the buttons below",
                 _ => "Hold the button and speak",
             };
@@ -421,8 +483,10 @@ namespace Cascade
             // idle: one compact card; the findings card appears once there is something to show
             ((RectTransform)Left).sizeDelta = new Vector2(540, inv == null ? 456 : H);
             ((RectTransform)Right).sizeDelta = new Vector2(540, inv == null ? 76 + 58 * Mathf.Max(1, net.Db.Issue.Count) + 20 : H);
-            findRoot.SetActive(inv != null);
-            issuesRoot.SetActive(inv == null);
+            findRoot.SetActive(inv != null && !showMetrics);
+            issuesRoot.SetActive(inv == null && !showMetrics);
+            metricsRoot.SetActive(showMetrics);
+            if (showMetrics) { ((RectTransform)Right).sizeDelta = new Vector2(540, H); RefreshMetrics(); }
             if (inv == null) RefreshIssues();
             logCaption.gameObject.SetActive(inv != null);
             var ai = net.Db.AiStatus.Id.Find(0);
@@ -441,7 +505,9 @@ namespace Cascade
             else if (inv.Status == "investigating") SetStatus("Investigating", CUi.AccentSoft, CUi.Accent);
             else if (inv.Status == "awaiting_approval") SetStatus("Action needed", CUi.DangerSoft, CUi.Danger);
             else if (inv.Status == "resolved") SetStatus("Plan running", CUi.GoodSoft, CUi.Good);
-            subline.text = inv == null ? "Harbor Point · Floor 3 · Tue 14:00 · 7 agents watching 6 assets"
+            int online = net.Db.User.Iter().Count(u => u.Online);
+            string team = online > 1 ? $" · {online} people online" : "";
+            subline.text = inv == null ? $"Harbor Point · Floor 3 · Tue 14:00 · 8 agents watching{team}"
                 : (inv.Source == "watchdog" ? "The watchdog noticed something: " : "You asked: ") + inv.Trigger;
 
             // team
@@ -596,6 +662,8 @@ namespace Cascade
             Seg(walkBtn, !Overview); Seg(mapBtn, Overview);
             Seg(techBtn, net.MyRole == "technician"); Seg(mgrBtn, net.MyRole == "manager");
             Seg(xrayBtn, xray);
+            Seg(metricsBtn, showMetrics);
+            CUi.Restyle(structBtn, structBtn.GetComponentInChildren<TextMeshProUGUI>(), structure ? CUi.Style.Primary : CUi.Style.Secondary);
         }
 
         static void Seg(Button b, bool on) => CUi.Restyle(b, b.GetComponentInChildren<TextMeshProUGUI>(), on ? CUi.Style.Primary : CUi.Style.Secondary);
@@ -606,7 +674,8 @@ namespace Cascade
         {
             var t = card.transform;
             bool life = !Overview;
-            t.position = cardKind == "issue" && issues ? issues.WorldOf(cardId) + Vector3.up * (life ? 0.55f : 0.05f)
+            t.position = cardKind == "wall" ? twin.WallWorld(cardId, life ? 1.6f : 1.6f) + Vector3.up * (life ? 0.1f : 0.06f)
+                : cardKind == "issue" && issues ? issues.WorldOf(cardId) + Vector3.up * (life ? 0.55f : 0.05f)
                 : twin.WorldOf(cardId, life ? 1.9f : 3.4f) + Vector3.up * (life ? 0.25f : 0.12f);
             t.localScale = Vector3.one * (life ? 0.0012f : 0.0006f);
             var d = t.position - cam.transform.position;
@@ -621,6 +690,29 @@ namespace Cascade
             cardSend.gameObject.SetActive(net.MyRole == "manager" || cardKind == "issue");
             cardSendText.text = cardKind == "issue" ? "Ask the team" : "Send technician";
             var frames = net.Frames(net.ScenarioFor(DisplayLabel));
+            cardGoText.text = cardKind == "wall" ? "What if we remove it?" : "Take me there";
+            if (cardKind == "wall")
+            {
+                var w = net.Db.Wall.Id.Find(cardId);
+                if (w == null) { card.gameObject.SetActive(false); return; }
+                var col = TwinView.StructureColor(w, 0);
+                cardSub.text = $"{TwinView.WallKindLabel(w).ToUpperInvariant()} · {w.Material.ToUpperInvariant()}";
+                cardTitle.text = w.Name;
+                string state = w.Proposal == "remove" ? w.ProposalState switch
+                {
+                    "evaluating" => "\n<color=#0284C7><b>The team is evaluating removing it…</b></color>",
+                    "recommended" => "\n<color=#059669><b>Removal recommended</b></color> · see the plan",
+                    "not_recommended" => "\n<color=#DC2626><b>Removal not recommended now</b></color>",
+                    "approved" => "\n<color=#059669><b>Removal approved and scheduled</b></color>",
+                    _ => "",
+                } : "";
+                cardBody.text = $"<color=#{CUi.Hex(w.Kind == "partition" ? CUi.InkMid : col)}><b>{Mathf.RoundToInt(w.Utilization * 100)}% of capacity</b></color> · carries {w.Carries.ToLowerInvariant()}\n" +
+                                $"Condition: <b>{(w.Health == "damaged" ? "cracking" : w.Health == "watch" ? "repair scheduled" : "good")}</b>" +
+                                (string.IsNullOrEmpty(w.Services) ? "" : $"\nInside: {w.Services.ToLowerInvariant()}") + state;
+                cardSend.gameObject.SetActive(true);
+                cardSendText.text = "Take me there";
+                return;
+            }
             if (cardKind == "issue")
             {
                 var i = net.Db.Issue.Id.Find(cardId);
@@ -712,12 +804,12 @@ namespace Cascade
 
         static string Initials(string a) => a switch
         {
-            "planner" => "PL", "signal" => "SA", "historian" => "HI", "lease" => "LA", "simulation" => "SE", "critic" => "CR", "narrator" => "NA", _ => "?",
+            "planner" => "PL", "signal" => "SA", "historian" => "HI", "lease" => "LA", "structural" => "ST", "simulation" => "SE", "critic" => "CR", "narrator" => "NA", _ => "?",
         };
 
         static string ShortName(string a) => a switch
         {
-            "planner" => "Planner", "signal" => "Signals", "historian" => "Historian", "lease" => "Leases", "simulation" => "Simulator", "critic" => "Critic", "narrator" => "Narrator", _ => a,
+            "planner" => "Planner", "signal" => "Signals", "historian" => "Historian", "lease" => "Leases", "structural" => "Structure", "simulation" => "Simulator", "critic" => "Critic", "narrator" => "Narrator", _ => a,
         };
 
         static string Short(string model) => string.IsNullOrEmpty(model) ? "" : model.Split('/').Last().Replace("llama-3.3-", "").ToUpperInvariant();

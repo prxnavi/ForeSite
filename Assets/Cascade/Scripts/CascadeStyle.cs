@@ -57,7 +57,7 @@ namespace Cascade
         };
 
         // ---- agents
-        public static readonly string[] Agents = { "planner", "signal", "historian", "lease", "simulation", "critic", "narrator" };
+        public static readonly string[] Agents = { "planner", "signal", "historian", "lease", "structural", "simulation", "critic", "narrator" };
 
         public static Color AgentColor(string a) => a switch
         {
@@ -65,6 +65,7 @@ namespace Cascade
             "signal" => Hex("#60A5FA"),
             "historian" => Hex("#FBBF24"),
             "lease" => Hex("#34D399"),
+            "structural" => Hex("#F97316"),
             "simulation" => Hex("#F472B6"),
             "critic" => Hex("#E5E7EB"),
             "narrator" => Hex("#22D3EE"),
@@ -77,6 +78,7 @@ namespace Cascade
             "signal" => "Signal Analyst",
             "historian" => "Historian",
             "lease" => "Lease Analyst",
+            "structural" => "Structural Engineer",
             "simulation" => "Sim Engineer",
             "critic" => "Critic",
             "narrator" => "Narrator",
@@ -99,12 +101,62 @@ namespace Cascade
         }
 
         static MaterialPropertyBlock mpb;
+        static readonly System.Collections.Generic.Dictionary<Renderer, Vector4> tiling = new();
+
         public static void Tint(Renderer r, Color c, Color emission = default)
         {
             mpb ??= new MaterialPropertyBlock();
+            mpb.Clear();
             mpb.SetColor("_Color", c);
             mpb.SetColor("_Emission", emission);
+            if (tiling.TryGetValue(r, out var st)) mpb.SetVector("_MainTex_ST", st);
             r.SetPropertyBlock(mpb);
+        }
+
+        // ---- lit, textured look (walk-through). Shader ships via Resources/CascadeLit.mat.
+        static Material litBase, glowBase;
+        static readonly System.Collections.Generic.Dictionary<string, Material> lit = new();
+
+        /// Standard-shader material with a procedural texture (null = plain), cached per texture + smoothness.
+        public static Material Lit(ProcTex.Kind? tex, float smooth = 0.15f)
+        {
+            string key = $"{tex}:{smooth:0.00}";
+            if (lit.TryGetValue(key, out var m) && m) return m;
+            litBase ??= Resources.Load<Material>("CascadeLit");
+            m = litBase ? new Material(litBase) : new Material(Shader.Find("Standard"));
+            if (tex.HasValue) m.mainTexture = ProcTex.Get(tex.Value);
+            m.SetFloat("_Glossiness", smooth);
+            lit[key] = m;
+            return m;
+        }
+
+        /// Lit material that also glows (screens, LEDs, window daylight).
+        public static Material LitGlow(Color c, float strength = 0.8f)
+        {
+            string key = $"glow:{ColorUtility.ToHtmlStringRGB(c)}:{strength:0.0}";
+            if (lit.TryGetValue(key, out var m) && m) return m;
+            glowBase ??= Resources.Load<Material>("CascadeLitGlow");
+            m = glowBase ? new Material(glowBase) : new Material(Shader.Find("Standard"));
+            m.color = c;
+            m.EnableKeyword("_EMISSION");
+            m.SetColor("_EmissionColor", c * strength);
+            lit[key] = m;
+            return m;
+        }
+
+        /// Repeat a renderer's texture every `repeat` meters across a surface of the given size.
+        public static void Tile(Renderer r, float widthM, float depthM, float repeat)
+        {
+            tiling[r] = repeat > 0 ? new Vector4(Mathf.Max(0.2f, widthM / repeat), Mathf.Max(0.2f, depthM / repeat), 0, 0) : new Vector4(1, 1, 0, 0);
+        }
+
+        public static GameObject LitBox(Transform parent, string name, Vector3 pos, Vector3 size, Material mat, Color color, float repeat = 0f)
+        {
+            var go = Cube(parent, name, pos, size, mat);
+            var r = go.GetComponent<Renderer>();
+            if (repeat > 0) Tile(r, Mathf.Max(size.x, size.z), Mathf.Max(size.y, Mathf.Min(size.x, size.z)), repeat);
+            Tint(r, color);
+            return go;
         }
 
         public static GameObject Cube(Transform parent, string name, Vector3 pos, Vector3 size, Material mat, bool collider = false)

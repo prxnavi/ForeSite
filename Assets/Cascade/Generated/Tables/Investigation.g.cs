@@ -51,6 +51,8 @@ namespace Cascade.Net
         public global::SpacetimeDB.Col<Investigation, string> PhasesDone { get; }
         public global::SpacetimeDB.Col<Investigation, uint> CritiqueRounds { get; }
         public global::SpacetimeDB.Col<Investigation, string> Pending { get; }
+        public global::SpacetimeDB.Col<Investigation, string> Kind { get; }
+        public global::SpacetimeDB.Col<Investigation, string> Subject { get; }
 
         public InvestigationCols(string tableName)
         {
@@ -65,6 +67,8 @@ namespace Cascade.Net
             PhasesDone = new global::SpacetimeDB.Col<Investigation, string>(tableName, "phases_done");
             CritiqueRounds = new global::SpacetimeDB.Col<Investigation, uint>(tableName, "critique_rounds");
             Pending = new global::SpacetimeDB.Col<Investigation, string>(tableName, "pending");
+            Kind = new global::SpacetimeDB.Col<Investigation, string>(tableName, "kind");
+            Subject = new global::SpacetimeDB.Col<Investigation, string>(tableName, "subject");
         }
     }
 

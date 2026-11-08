@@ -36,6 +36,10 @@ namespace Cascade.Net
         public uint CritiqueRounds;
         [DataMember(Name = "pending")]
         public string Pending;
+        [DataMember(Name = "kind")]
+        public string Kind;
+        [DataMember(Name = "subject")]
+        public string Subject;
 
         public Investigation(
             ulong Id,
@@ -48,7 +52,9 @@ namespace Cascade.Net
             string Phase,
             string PhasesDone,
             uint CritiqueRounds,
-            string Pending
+            string Pending,
+            string Kind,
+            string Subject
         )
         {
             this.Id = Id;
@@ -62,6 +68,8 @@ namespace Cascade.Net
             this.PhasesDone = PhasesDone;
             this.CritiqueRounds = CritiqueRounds;
             this.Pending = Pending;
+            this.Kind = Kind;
+            this.Subject = Subject;
         }
 
         public Investigation()
@@ -74,6 +82,8 @@ namespace Cascade.Net
             this.Phase = "";
             this.PhasesDone = "";
             this.Pending = "";
+            this.Kind = "";
+            this.Subject = "";
         }
     }
 }

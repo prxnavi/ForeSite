@@ -26,6 +26,8 @@ namespace Cascade
         public int Version { get; private set; }
         /// Scene commands as they arrive (live only, after the initial sync).
         public event Action<SceneCmd> SceneCommand;
+        /// A teammate flagged a place (event table: delivered live, never stored).
+        public event Action<Net.Ping> Pinged;
 
         readonly string uri, database;
         string name = "Guest", role = "manager";
@@ -48,7 +50,8 @@ namespace Cascade
             Hook(db.Room); Hook(db.Asset); Hook(db.Dependency); Hook(db.WorkOrder); Hook(db.Tenant); Hook(db.Notice);
             Hook(db.Scenario); Hook(db.Investigation); Hook(db.Subtask); Hook(db.Evidence); Hook(db.Hypothesis);
             Hook(db.ActionCandidate); Hook(db.Critique); Hook(db.Decision); Hook(db.Answer); Hook(db.AgentStep);
-            Hook(db.User); Hook(db.Timeline); Hook(db.Issue); Hook(db.SensorReading); Hook(db.PastIncident); Hook(db.SceneCommand);
+            Hook(db.User); Hook(db.Timeline); Hook(db.Issue); Hook(db.Wall); Hook(db.Metric); Hook(db.FieldNote);
+            db.Ping.OnInsert += (_, r) => { if (Ready) Pinged?.Invoke(r); }; Hook(db.SensorReading); Hook(db.PastIncident); Hook(db.SceneCommand);
             db.SceneCommand.OnInsert += (_, r) => { if (Ready) Emit(r.Payload); };
             db.Scenario.OnInsert += (_, _) => framesCache.Clear();
             db.Scenario.OnDelete += (_, _) => framesCache.Clear();
@@ -136,6 +139,9 @@ namespace Cascade
         public void Approve(ulong id, bool on) { if (Ok()) Conn.Reducers.ApproveAction(id, on); }
         public void Execute() { if (Ok()) Conn.Reducers.ExecuteAction(); }
         public void ResetDemo() { if (Ok()) Conn.Reducers.ResetDemo(); }
+        public void SendPing(string targetId, string kind) { if (Ok()) Conn.Reducers.SendPing(targetId ?? "", kind); }
+        public void AddNote(string targetId, string text, bool isPrivate) { if (Ok()) Conn.Reducers.AddNote(targetId ?? "", text, isPrivate); }
+        public void ProposeWallRemoval(string wallId) { if (Ok()) Conn.Reducers.ProposeWallChange(wallId, "remove"); }
         public void UpdatePosition(Vector2 p, bool present) { if (Ok()) Conn.Reducers.UpdatePosition(p.x, p.y, present); }
     }
 

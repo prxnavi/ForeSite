@@ -9,7 +9,7 @@
 // Narrator). Every number it says comes from a real table read or simulation run.
 // Nemotron (optional) rewrites the Narrator's answers when an NVIDIA key is set.
 
-import { schema, table, t, SenderError, type InferSchema, type ReducerCtx, type ProcedureCtx } from 'spacetimedb/server';
+import { schema, table, t, SenderError, Router, SyncResponse, type InferSchema, type ReducerCtx, type ProcedureCtx } from 'spacetimedb/server';
 import { ScheduleAt, TimeDuration } from 'spacetimedb';
 
 // ================================================================ tables
@@ -103,6 +103,86 @@ const issue = table({ name: 'issue', public: true }, {
   status: t.string(), // open | scheduled | resolved
 });
 
+// Walls as structural elements (load-bearing vs partition, load, condition, what runs inside).
+const wall = table({ name: 'wall', public: true }, {
+  id: t.string().primaryKey(),
+  name: t.string(),
+  x0: t.f32(), z0: t.f32(), x1: t.f32(), z1: t.f32(),
+  kind: t.string(), // exterior | bearing | partition
+  material: t.string(),
+  utilization: t.f32(), // share of capacity in use (0..1)
+  carries: t.string(),
+  health: t.string(), // ok | watch | damaged
+  services: t.string(), // what runs inside it
+  proposal: t.string(), // '' | remove
+  proposalState: t.string(), // '' | evaluating | recommended | not_recommended | approved
+  loadKnm: t.f32(), // line load from the framing analysis (kN/m)
+  capacityKnm: t.f32(), // allowable line load (kN/m), reduced if cracked
+  fireRated: t.bool(),
+  planOnlyBearing: t.bool(), // what the floor plan alone suggests
+  planOnlyWhy: t.string(),
+});
+
+// ---- blueprint knowledge graph
+const blueprint = table({ name: 'blueprint', public: true }, {
+  id: t.string().primaryKey(), name: t.string(), source: t.string(), json: t.string(), loadedAt: t.timestamp(),
+});
+const element = table({ name: 'element', public: true }, {
+  id: t.string().primaryKey(),
+  kind: t.string(), // wall | bay | point_load | room | foundation
+  label: t.string(),
+  x0: t.f32(), z0: t.f32(), x1: t.f32(), z1: t.f32(),
+  value: t.f32(), unit: t.string(), detail: t.string(),
+});
+const elementEdge = table({ name: 'element_edge', public: true }, {
+  id: t.u64().primaryKey().autoInc(),
+  fromId: t.string().index('btree'),
+  toId: t.string().index('btree'),
+  rel: t.string(), // supports | carries | bounds | separates_fire
+  value: t.f32(),
+});
+
+// ---- evaluation + metrics
+const evalCase = table({ name: 'eval_case', public: true }, {
+  id: t.string().primaryKey(), question: t.string(), kind: t.string(), subject: t.string(), expected: t.string(),
+});
+const evalResult = table({ name: 'eval_result', public: true }, {
+  id: t.u64().primaryKey().autoInc(), runId: t.string(), caseId: t.string(), mode: t.string(),
+  answer: t.string(), correct: t.bool(), latencyMs: t.f32(), toolCalls: t.u32(), grounded: t.bool(),
+});
+const metric = table({ name: 'metric', public: true }, {
+  key: t.string().primaryKey(), label: t.string(), value: t.f64(), unit: t.string(), detail: t.string(), group: t.string(), at: t.timestamp(),
+});
+const toolCall = table({ name: 'tool_call', public: true }, {
+  id: t.u64().primaryKey().autoInc(), invId: t.u64(), agent: t.string(), tool: t.string(), ok: t.bool(), error: t.string(), model: t.string(), ms: t.f32(),
+});
+const llmCall = table({ name: 'llm_call', public: true }, {
+  id: t.u64().primaryKey().autoInc(), invId: t.u64(), agent: t.string(), model: t.string(), ms: t.f32(),
+  promptTokens: t.u32(), completionTokens: t.u32(), ok: t.bool(),
+});
+// Event table: rows are broadcast to subscribers and never stored (latency probe).
+const benchEcho = table({ name: 'bench_echo', public: true, event: true }, {
+  seq: t.u32(), at: t.timestamp(),
+});
+
+// ---- collaboration
+// Pings are an event table: broadcast to every headset instantly, never stored.
+const ping = table({ name: 'ping', public: true, event: true }, {
+  fromName: t.string(), fromRole: t.string(), targetId: t.string(), x: t.f32(), z: t.f32(), kind: t.string(), label: t.string(),
+});
+// Field notes from people on site. Private notes are hidden from everyone but their author by row-level security.
+const fieldNote = table({ name: 'field_note', public: true }, {
+  id: t.u64().primaryKey().autoInc(),
+  author: t.identity(),
+  authorName: t.string(),
+  role: t.string(),
+  targetId: t.string(),
+  x: t.f32(), z: t.f32(),
+  text: t.string(),
+  isPrivate: t.bool(),
+  at: t.timestamp(),
+});
+
 const notice = table({ name: 'notice', public: true }, {
   id: t.u64().primaryKey().autoInc(),
   tenantId: t.string(),
@@ -139,6 +219,8 @@ const investigation = table({ name: 'investigation', public: true }, {
   phasesDone: t.string(), // comma list
   critiqueRounds: t.u32(),
   pending: t.string(), // revision phases still running (comma list)
+  kind: t.string(), // cascade | structural_change
+  subject: t.string(), // wall id for structural changes
 });
 
 const subtask = table({ name: 'subtask', public: true }, {
@@ -300,6 +382,11 @@ const nemotronCheckJob = table({ name: 'nemotron_check_job' }, {
   scheduledId: t.u64().primaryKey().autoInc(),
   scheduledAt: t.scheduleAt(),
 });
+const evalJob = table({ name: 'eval_job' }, {
+  scheduledId: t.u64().primaryKey().autoInc(),
+  scheduledAt: t.scheduleAt(),
+  caseIds: t.string(),
+});
 const narrateJob = table({ name: 'narrate_job' }, {
   scheduledId: t.u64().primaryKey().autoInc(),
   scheduledAt: t.scheduleAt(),
@@ -307,7 +394,8 @@ const narrateJob = table({ name: 'narrate_job' }, {
 });
 
 const spacetimedb = schema({
-  room, asset, dependency, sensorReading, workOrder, tenant, pastIncident, notice, issue,
+  room, asset, dependency, sensorReading, workOrder, tenant, pastIncident, notice, issue, wall,
+  blueprint, element, elementEdge, evalCase, evalResult, metric, toolCall, llmCall, benchEcho, evalJob, ping, fieldNote,
   scenario, investigation, subtask, evidence, hypothesisEvidence, hypothesis, actionCandidate, critique, decision, answer, agentStep,
   aiStatus, sceneCommand, user, timeline, agentPlan, agentTick, replayTick, plantState, secret, owner, agentJob, nemotronCheckJob, narrateJob,
 });
@@ -397,8 +485,6 @@ function seedBuilding(ctx: Ctx) {
   clearTable(db.pastIncident.iter(), r => db.pastIncident.id.delete(r.id));
   clearTable(db.notice.iter(), r => db.notice.id.delete(r.id));
   clearTable(db.issue.iter(), r => db.issue.id.delete(r.id));
-  for (const [id, kind, severity, title, detail, source, roomId, assetId, surface, x, y, z, nx, nz] of ISSUES)
-    db.issue.insert({ id, kind, severity, title, detail, source, roomId, assetId, surface, x, y, z, nx, nz, status: 'open' });
 
   for (const [id, name, kind, x0, z0, x1, z1, doorX, doorZ, tenantId, demand, startTemp, limitTemp, warmRate] of ROOMS)
     db.room.insert({ id, name, kind, x0, z0, x1, z1, doorX, doorZ, tenantId, demand, startTemp, limitTemp, warmRate });
@@ -422,6 +508,10 @@ function seedBuilding(ctx: Ctx) {
     const climb = h < 8 ? (8 - h) * 0.32 : 0;
     db.sensorReading.insert({ id: 0n, assetId: 'CH-2', hoursAgo: h, value: 2.4 + wobble(2) + climb });
   }
+  // after rooms and assets exist: inspection findings, then the blueprint graph + structural analysis
+  for (const [id, kind, severity, title, detail, source, roomId, assetId, surface, x, y, z, nx, nz] of ISSUES)
+    db.issue.insert({ id, kind, severity, title, detail, source, roomId, assetId, surface, x, y, z, nx, nz, status: 'open' });
+  seedWalls(ctx);
 }
 
 // ================================================================ simulation
@@ -687,8 +777,10 @@ const OPS: Op[] = [
   { agent: 'narrator', tool: 'post_answer', why: 'Explaining it to each person', target: 'CH-2' },
 ];
 
-const STEP_MICROS = 1_150_000n;
-const DONE_MICROS = 450_000n;
+const STEP_MICROS = 750_000n;
+// The scripted cascade team: OPS plus the Structural Engineer (codes 21, 22) after the Historian.
+const CASCADE_ORDER = [0, 1, 2, 3, 4, 5, 6, 7, 8, 21, 22, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+const DONE_MICROS = 300_000n;
 
 function schedule(ctx: Ctx, invId: bigint, micros: bigint) {
   ctx.db.agentTick.insert({ scheduledId: 0n, scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + micros), invId });
@@ -711,16 +803,17 @@ function clearBlackboard(ctx: Ctx) {
   clearTable(db.scenario.iter(), r => db.scenario.id.delete(r.id));
 }
 
-function openInvestigation(ctx: Ctx, trigger: string, source: string, askedBy: string) {
+function openInvestigation(ctx: Ctx, trigger: string, source: string, askedBy: string, kind = 'cascade', subject = '') {
   clearBlackboard(ctx);
+  if (kind !== 'structural_change') for (const w of [...ctx.db.wall.iter()]) if (w.proposal) ctx.db.wall.id.update({ ...w, proposal: '', proposalState: '' });
   const ai = nemotronReady(ctx);
   const inv = ctx.db.investigation.insert({ id: 0n, trigger, source, askedBy, status: 'investigating', createdAt: ctx.timestamp,
-    mode: ai ? 'nemotron' : 'scripted', phase: ai ? 'plan' : '', phasesDone: '', critiqueRounds: 0, pending: '' });
+    mode: ai ? 'nemotron' : 'scripted', phase: ai ? 'plan' : '', phasesDone: '', critiqueRounds: 0, pending: '', kind, subject });
   emit(ctx, { kind: 'clear' });
   setTimeline(ctx, { hour: 0, label: 'do_nothing' });
   if (ai) scheduleJob(ctx, inv.id, 'plan', '', 200_000n);
   else {
-    ctx.db.agentPlan.insert({ invId: inv.id, cursor: 0, opsJson: '' });
+    ctx.db.agentPlan.insert({ invId: inv.id, cursor: 0, opsJson: kind });
     schedule(ctx, inv.id, 400_000n);
   }
   return inv;
@@ -761,6 +854,8 @@ function postEvidence(ctx: Ctx, invId: bigint, agent: string, fact: string, sour
     sourceTable === 'tenant' ? !!ctx.db.tenant.id.find(sourceRow) :
     sourceTable === 'past_incident' ? !!ctx.db.pastIncident.id.find(sourceRow) :
     sourceTable === 'issue' ? !!ctx.db.issue.id.find(sourceRow) :
+    sourceTable === 'wall' ? !!ctx.db.wall.id.find(sourceRow) :
+    sourceTable === 'field_note' ? (() => { try { const n = ctx.db.fieldNote.id.find(BigInt(sourceRow)); return !!n && !n.isPrivate; } catch { return false; } })() :
     sourceTable === 'sensor_reading' || sourceTable === 'scenario' || sourceTable === 'dependency';
   if (!exists) throw new SenderError(`evidence cites missing row ${sourceTable}/${sourceRow}`);
   const row = ctx.db.evidence.insert({ id: 0n, invId, agent, fact, sourceTable, sourceRow, confidence, hypothesisId: hyp(ctx, invId, hypAsset), supports, aboutAsset: hypAsset });
@@ -800,12 +895,13 @@ function runOp(ctx: Ctx, inv: { id: bigint; trigger: string }, op: Op, index: nu
         ['signal', 'Find unusual sensor readings and time to threshold', ''],
         ['historian', 'Check asset age, open tickets and past incidents', ''],
         ['lease', 'Map affected rooms to tenants and their lease terms', ''],
+        ['structural', 'Check the load path and damage near the failing equipment', ''],
         ['simulation', 'Simulate the next 24 hours and test fixes', 'signal,historian,lease'],
         ['critic', 'Challenge the evidence and the plan', 'simulation'],
       ];
       for (const [agent, goal, dependsOn] of plan)
         db.subtask.insert({ id: 0n, invId: id, agent, goal, dependsOn, status: dependsOn ? 'waiting' : 'ready' });
-      return { result: '5 subtasks · signal, historian, lease run in parallel' };
+      return { result: '6 subtasks · signal, historian, lease, structural in parallel' };
     }
     case 3: {
       claim(ctx, id, 'signal');
@@ -910,10 +1006,11 @@ function runOp(ctx: Ctx, inv: { id: bigint; trigger: string }, op: Op, index: nu
         ['load_shift', 'CH-1', 'Shift server room to Chiller 1', 'Send Chiller 1 spare capacity to Server Room 300 first.', 150],
         ['tenant_notice', 'SRV300', 'Notify Northwind Analytics', 'Advance notice of maintenance; halves the uptime penalty if anything slips.', 0],
         ['portable_cooling', 'SRV300', 'Rent portable cooling', '15-ton unit in Server Room 300 for 24 h.', 1200],
+        ['structural_repair', 'MECH', 'Isolate Chiller 2 and inject the wall cracks', 'Vibration isolation pads plus epoxy crack injection in the Mechanical east wall.', 6500],
       ];
       for (const [kind, target, title, detail, cost] of acts)
         db.actionCandidate.insert({ id: 0n, invId: id, kind, target, title, detail, cost, saved: 0, rank: 0, recommended: false, status: 'proposed' });
-      return { result: '4 candidates: repair, load shift, tenant notice, portable cooling' };
+      return { result: '5 candidates: repair, load shift, notice, cooling, structural repair' };
     }
     case 15: {
       // Re-simulate each action on its own and the recommended combination; rank by dollars saved per dollar.
@@ -926,6 +1023,7 @@ function runOp(ctx: Ctx, inv: { id: bigint; trigger: string }, op: Op, index: nu
         const pl = planFor(a.kind);
         // repairs take CH-2 offline for 3 h: test with the load shift that must go with it
         if (pl.repair) pl.loadShift = true;
+        if (a.kind === 'structural_repair') { const g = crackGrowth(ctx); return { a, saved: g.emergencyCost - g.plannedCost }; }
         const e = riskEstimate(ctx, b, pl, f.hours, p).expected;
         return { a, saved: Math.max(0, base - e) };
       });
@@ -969,7 +1067,7 @@ function runOp(ctx: Ctx, inv: { id: bigint; trigger: string }, op: Op, index: nu
       const wp = [...db.scenario.iter()].find(s => s.label === 'with_plan')!;
       db.decision.insert({
         id: 0n, invId: id, rootCause: top.text, likelihood: top.likelihood,
-        summary: `Repair Chiller 2 today with the server room on Chiller 1, and notify Northwind. Outage risk ${Math.round(dn.outageChance * 100)}% → ${Math.round(wp.outageChance * 100)}%, impact ${money(dn.impact)} → ${money(wp.impact)}. Would change our mind: Chiller 1 vibration rising too.`,
+        summary: `Repair Chiller 2 today with the server room on Chiller 1, notify Northwind, and isolate the chiller so the wall cracks stop growing. Outage risk ${Math.round(dn.outageChance * 100)}% → ${Math.round(wp.outageChance * 100)}%, impact ${money(dn.impact)} → ${money(wp.impact)}. Would change our mind: Chiller 1 vibration rising too.`,
       });
       return { result: `root cause ${top.assetId} (${Math.round(top.likelihood * 100)}%)` };
     }
@@ -979,7 +1077,7 @@ function runOp(ctx: Ctx, inv: { id: bigint; trigger: string }, op: Op, index: nu
       db.answer.insert({ id: 0n, invId: id, role: 'technician', byNemotron: false,
         text: `Chiller 2's bearing is failing and will likely trip around ${clock(f.hours)}. Go to the Mechanical room; I've drawn the path. Check the bearing first, then shift the server room to Chiller 1.` });
       db.answer.insert({ id: 0n, invId: id, role: 'manager', byNemotron: false,
-        text: `If we do nothing, Server Room 300 overheats tonight: ${dn.downtimeHours.toFixed(1)} hours down and about ${money(dn.impact)} in losses and penalties. I recommend a planned repair today for ${money(PLANNED_REPAIR_COST)}, with a load shift and a tenant notice. Approve to proceed.` });
+        text: `If we do nothing, Server Room 300 overheats tonight: ${dn.downtimeHours.toFixed(1)} hours down and about ${money(dn.impact)}. The same vibration is cracking the load-bearing Mechanical wall. I recommend the ${money(PLANNED_REPAIR_COST)} repair today plus ${money(6500)} to isolate the chiller and seal the cracks; approve to proceed.` });
       emit(ctx, { kind: 'guide_trail', target: 'CH-2', forRole: 'technician' });
       emit(ctx, { kind: 'thread', ids: ['CH-2', 'AHU-2', 'SRV300'] });
       const inv2 = db.investigation.id.find(id)!;
@@ -997,19 +1095,453 @@ export const runAgentTick = spacetimedb.reducer({ onSchedule: agentTick }, { tim
   if (!plan || !inv) return;
   const c = plan.cursor;
   const i = Math.floor(c / 2);
-  if (i >= OPS.length) { ctx.db.agentPlan.invId.delete(plan.invId); return; }
-  const op = OPS[i];
+  const wallPlan = plan.opsJson === 'structural_change';
+  const order = wallPlan ? WALL_OPS.map((_, k) => 100 + k) : CASCADE_ORDER;
+  if (i >= order.length) { ctx.db.agentPlan.invId.delete(plan.invId); return; }
+  const code = order[i];
+  const op = code >= 100 ? WALL_OPS[code - 100] : code >= 21 ? STRUCT_OPS[code - 21] : OPS[code];
+  // wall plans: orbs gather at the room beside the wall in question
+  const target = code >= 100 ? (roomsBeside(ctx, wallOf(ctx, inv.id))[0]?.id ?? '') : op.target ?? '';
   if (c % 2 === 0) {
-    ctx.db.agentStep.insert({ id: 0n, invId: inv.id, seq: i, agent: op.agent, tool: op.tool, why: op.why, result: '', target: op.target ?? '', status: 'running', model: '' });
+    ctx.db.agentStep.insert({ id: 0n, invId: inv.id, seq: i, agent: op.agent, tool: op.tool, why: op.why, result: '', target, status: 'running', model: '' });
     schedule(ctx, inv.id, STEP_MICROS);
   } else {
-    const out = runOp(ctx, inv, op, i);
+    const out = code >= 100 ? runWallOp(ctx, inv.id, code - 100) : code >= 21 ? runStructOp(ctx, inv.id, code - 21) : runOp(ctx, inv, op, code);
     const row = [...ctx.db.agentStep.iter()].find(s => s.invId === inv.id && s.seq === i);
     if (row) ctx.db.agentStep.id.update({ ...row, result: out.result, status: out.status ?? 'done' });
     schedule(ctx, inv.id, DONE_MICROS);
   }
   ctx.db.agentPlan.invId.update({ ...plan, cursor: c + 1 });
 });
+
+// ================================================================ blueprint → knowledge graph → structural reasoning
+// The plan is ingested once (reducer or HTTP POST /blueprint) and turned into a building
+// graph inside the database: walls, roof bays, rooftop loads and rooms as `element` rows,
+// linked by `element_edge` rows (bounds, supports, carries, separates). Two reasoners run on
+// it, both as plain functions next to the data:
+//   1. plan-only inference: what you can tell from a floor plan alone (exterior, continuity)
+//   2. framing-aware analysis: tributary loads from the framing sheet → load per wall,
+//      utilization, load paths, beam sizing for removals, code checks.
+// Ground truth from the as-built drawings scores both (see the eval harness).
+
+type BpWall = { id: string; name: string; a: [number, number]; b: [number, number]; drawn: number; material: string; services: string; fireRated?: boolean; damaged?: boolean };
+type BpBay = { id: string; x0: number; z0: number; x1: number; z1: number; span: 'x' | 'z'; deadKPa: number; liveKPa: number; note: string };
+type BpLoad = { id: string; label: string; x: number; z: number; kN: number; bay: string };
+type Blueprint = { id: string; name: string; source: string; walls: BpWall[]; bays: BpBay[]; pointLoads: BpLoad[]; asBuilt: { bearing: string[] } };
+
+const HARBOR_POINT: Blueprint = {
+  id: 'BP-HARBOR-3', name: 'Harbor Point, Floor 3 (top floor)',
+  source: 'Plan: CubiCasa5K-style wall/room/door annotations · Framing: structural sheet S-201 · Truth: as-built drawings',
+  walls: [
+    { id: 'W-EXT-S', name: 'South exterior wall', a: [0, 0], b: [24, 0], drawn: 0.3, material: 'Reinforced CMU', services: '' },
+    { id: 'W-EXT-N', name: 'North exterior wall', a: [0, 16], b: [24, 16], drawn: 0.3, material: 'Reinforced CMU', services: '' },
+    { id: 'W-EXT-W', name: 'West exterior wall', a: [0, 0], b: [0, 16], drawn: 0.3, material: 'Reinforced CMU', services: '' },
+    { id: 'W-EXT-E', name: 'East exterior wall', a: [24, 0], b: [24, 16], drawn: 0.3, material: 'Reinforced CMU', services: '' },
+    { id: 'W-SPINE-S', name: 'Corridor south wall', a: [0, 7], b: [24, 7], drawn: 0.15, material: 'Steel stud + CMU core', services: 'Chilled-water main to AHU-2 and AHU-3' },
+    { id: 'W-SPINE-N', name: 'Corridor north wall', a: [0, 9], b: [24, 9], drawn: 0.15, material: 'Steel stud + CMU core', services: 'Sprinkler main' },
+    { id: 'W-MECH-E', name: 'Mechanical room east wall', a: [5, 0], b: [5, 7], drawn: 0.15, material: 'CMU', services: 'Chilled-water risers to AHU-2', damaged: true },
+    { id: 'W-300-SRV', name: 'Suite 300 / Server Room wall', a: [14, 0], b: [14, 7], drawn: 0.15, material: 'Metal stud + 2 layers drywall', services: 'AHU-2 supply duct and 2 data conduits' },
+    { id: 'W-SRV-400', name: 'Server Room / Suite 400 wall', a: [18, 0], b: [18, 7], drawn: 0.15, material: 'Metal stud, 1-hour fire rated', services: 'Fire alarm cabling', fireRated: true },
+    { id: 'W-LOB-100', name: 'Lobby / Suite 100 wall', a: [5, 9], b: [5, 16], drawn: 0.15, material: 'Metal stud + drywall', services: '' },
+    { id: 'W-100-200', name: 'Suite 100 / Suite 200 wall', a: [12, 9], b: [12, 16], drawn: 0.15, material: 'Metal stud + drywall', services: 'Electrical branch circuit' },
+    { id: 'W-200-COM', name: 'Suite 200 / Commons wall', a: [18, 9], b: [18, 16], drawn: 0.15, material: 'CMU', services: 'Sprinkler branch line' },
+  ],
+  // Roof framing (S-201): each bay's joists span one way and rest on the bay edges across the span.
+  bays: [
+    { id: 'BAY-MECH', x0: 0, z0: 0, x1: 5, z1: 7, span: 'x', deadKPa: 2.0, liveKPa: 1.5, note: 'Joists run east-west under the cooling-tower curb' },
+    { id: 'BAY-S', x0: 5, z0: 0, x1: 24, z1: 7, span: 'z', deadKPa: 2.0, liveKPa: 1.5, note: 'Joists run north-south' },
+    { id: 'BAY-CORR', x0: 0, z0: 7, x1: 24, z1: 9, span: 'z', deadKPa: 2.0, liveKPa: 1.5, note: 'Short joists over the corridor' },
+    { id: 'BAY-NW', x0: 0, z0: 9, x1: 18, z1: 16, span: 'z', deadKPa: 2.0, liveKPa: 1.5, note: 'Joists run north-south' },
+    { id: 'BAY-NE', x0: 18, z0: 9, x1: 24, z1: 16, span: 'x', deadKPa: 2.0, liveKPa: 1.5, note: 'Joists run east-west under the rooftop unit' },
+  ],
+  pointLoads: [
+    { id: 'RT-1', label: 'Cooling tower (Chiller 2 heat rejection)', x: 3, z: 3.5, kN: 60, bay: 'BAY-MECH' },
+    { id: 'RT-2', label: 'Rooftop unit over Commons', x: 21, z: 12.5, kN: 40, bay: 'BAY-NE' },
+  ],
+  asBuilt: { bearing: ['W-EXT-S', 'W-EXT-N', 'W-EXT-W', 'W-EXT-E', 'W-SPINE-S', 'W-SPINE-N', 'W-MECH-E', 'W-200-COM'] },
+};
+
+// capacity per meter of wall (kN/m), simplified allowable axial line load by assembly
+const CAPACITY: Record<string, number> = { 'Reinforced CMU': 40, 'CMU': 30, 'Steel stud + CMU core': 26 };
+const PARTITION_CAPACITY = 3; // self weight only
+const CRACK_CAPACITY_LOSS = 0.15;
+const SPREAD_M = 3; // a rooftop load spreads over ~3 m of its supporting wall
+
+// Wide-flange steel sections: [name, S (cm³), I (cm⁴), kg/m]
+const W_SHAPES: [string, number, number, number][] = [
+  ['W8x18', 249, 2580, 27], ['W10x26', 454, 5080, 39], ['W12x35', 749, 11900, 52], ['W14x48', 1150, 20100, 71],
+  ['W16x57', 1520, 31000, 85], ['W18x71', 2240, 48300, 106], ['W21x83', 2810, 70800, 124], ['W24x104', 4000, 129000, 155],
+];
+const FY = 345, E_STEEL = 200000; // MPa
+
+const onLine = (w: BpWall, axis: 'x' | 'z', c: number) =>
+  axis === 'z' ? Math.abs(w.a[1] - c) < 0.01 && Math.abs(w.b[1] - c) < 0.01 : Math.abs(w.a[0] - c) < 0.01 && Math.abs(w.b[0] - c) < 0.01;
+const overlap = (a0: number, a1: number, b0: number, b1: number) => Math.max(0, Math.min(Math.max(a0, a1), Math.max(b0, b1)) - Math.max(Math.min(a0, a1), Math.min(b0, b1)));
+
+type WallLoad = { kNm: number; from: { bay: string; kNm: number }[]; point: { id: string; kN: number }[] };
+
+/** Tributary-area load analysis: each bay's area load goes half to each support edge; point loads split by lever rule. */
+function analyzeLoads(bp: Blueprint): Map<string, WallLoad> {
+  const out = new Map<string, WallLoad>(bp.walls.map(w => [w.id, { kNm: 0, from: [], point: [] }]));
+  for (const bay of bp.bays) {
+    const q = bay.deadKPa + bay.liveKPa;
+    const span = bay.span === 'z' ? bay.z1 - bay.z0 : bay.x1 - bay.x0;
+    const edges = bay.span === 'z' ? [bay.z0, bay.z1] : [bay.x0, bay.x1];
+    for (const c of edges) {
+      const axis: 'x' | 'z' = bay.span === 'z' ? 'z' : 'x';
+      for (const w of bp.walls) {
+        if (!onLine(w, axis, c)) continue;
+        const ov = axis === 'z' ? overlap(w.a[0], w.b[0], bay.x0, bay.x1) : overlap(w.a[1], w.b[1], bay.z0, bay.z1);
+        if (ov < 0.5) continue;
+        const kNm = q * span / 2;
+        const wl = out.get(w.id)!;
+        wl.kNm += kNm; wl.from.push({ bay: bay.id, kNm: Math.round(kNm * 10) / 10 });
+      }
+    }
+    for (const p of bp.pointLoads.filter(p => p.bay === bay.id)) {
+      const pos = bay.span === 'z' ? p.z : p.x;
+      const [c0, c1] = edges;
+      const shares: [number, number][] = [[c0, p.kN * (c1 - pos) / (c1 - c0)], [c1, p.kN * (pos - c0) / (c1 - c0)]];
+      for (const [c, kN] of shares) {
+        const axis: 'x' | 'z' = bay.span === 'z' ? 'z' : 'x';
+        const w = bp.walls.find(w2 => onLine(w2, axis, c) && (axis === 'z' ? overlap(w2.a[0], w2.b[0], p.x - 0.1, p.x + 0.1) : overlap(w2.a[1], w2.b[1], p.z - 0.1, p.z + 0.1)) > 0.1);
+        if (!w) continue;
+        const wl = out.get(w.id)!;
+        wl.kNm += kN / SPREAD_M; wl.point.push({ id: p.id, kN: Math.round(kN * 10) / 10 });
+      }
+    }
+  }
+  for (const wl of out.values()) wl.kNm = Math.round(wl.kNm * 10) / 10;
+  return out;
+}
+
+/** Plan-only guess (what a floor plan alone suggests): exterior walls and long continuous walls bear. */
+function planOnlyBearing(bp: Blueprint, w: BpWall): { bearing: boolean; why: string } {
+  const len = Math.hypot(w.b[0] - w.a[0], w.b[1] - w.a[1]);
+  const xs = bp.walls.flatMap(x => [x.a[0], x.b[0]]), zs = bp.walls.flatMap(x => [x.a[1], x.b[1]]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minZ = Math.min(...zs), maxZ = Math.max(...zs);
+  const exterior = onLine(w, 'x', minX) || onLine(w, 'x', maxX) || onLine(w, 'z', minZ) || onLine(w, 'z', maxZ);
+  if (exterior) return { bearing: true, why: 'on the building perimeter' };
+  if (len >= 0.8 * Math.max(maxX - minX, maxZ - minZ)) return { bearing: true, why: `runs ${len} m, nearly the full building` };
+  if (w.drawn >= 0.25) return { bearing: true, why: 'drawn thick' };
+  return { bearing: false, why: `short interior wall (${len} m), drawn like a partition` };
+}
+
+function sizeBeam(kNm: number, spanM: number) {
+  const M = kNm * spanM * spanM / 8; // kN·m
+  const Sreq = M * 1e6 / (0.66 * FY) / 1000; // cm³
+  const Ireq = 5 * kNm * Math.pow(spanM * 1000, 3) * 360 / (384 * E_STEEL) / 1e4; // cm⁴, L/360
+  const pick = W_SHAPES.find(s => s[1] >= Sreq && s[2] >= Ireq);
+  return { M: Math.round(M), Sreq: Math.round(Sreq), Ireq: Math.round(Ireq), R: Math.round(kNm * spanM / 2), shape: pick?.[0] ?? '', kgPerM: pick?.[3] ?? 0 };
+}
+
+/** Rebuild the knowledge graph and the derived `wall` table from a blueprint. */
+function ingestBlueprint(ctx: Ctx, bp: Blueprint) {
+  const db = ctx.db;
+  if (db.blueprint.id.find(bp.id)) db.blueprint.id.delete(bp.id);
+  db.blueprint.insert({ id: bp.id, name: bp.name, source: bp.source, json: JSON.stringify(bp), loadedAt: ctx.timestamp });
+  clearTable(db.element.iter(), r => db.element.id.delete(r.id));
+  clearTable(db.elementEdge.iter(), r => db.elementEdge.id.delete(r.id));
+  clearTable(db.wall.iter(), r => db.wall.id.delete(r.id));
+
+  const loads = analyzeLoads(bp);
+  const rooms = [...db.room.iter()];
+  db.element.insert({ id: 'FOUNDATION', kind: 'foundation', label: 'Foundation', x0: 0, z0: 0, x1: 0, z1: 0, value: 0, unit: '', detail: 'Strip footings under bearing walls' });
+  for (const bay of bp.bays)
+    db.element.insert({ id: bay.id, kind: 'bay', label: bay.note, x0: bay.x0, z0: bay.z0, x1: bay.x1, z1: bay.z1, value: bay.deadKPa + bay.liveKPa, unit: 'kPa', detail: `span ${bay.span}` });
+  for (const p of bp.pointLoads) {
+    db.element.insert({ id: p.id, kind: 'point_load', label: p.label, x0: p.x, z0: p.z, x1: p.x, z1: p.z, value: p.kN, unit: 'kN', detail: p.bay });
+    db.elementEdge.insert({ id: 0n, fromId: p.bay, toId: p.id, rel: 'carries', value: p.kN });
+  }
+  for (const w of bp.walls) {
+    const wl = loads.get(w.id)!;
+    const exterior = planOnlyBearing(bp, w).why === 'on the building perimeter';
+    const bearing = wl.kNm > 1;
+    const baseCap = bearing ? CAPACITY[w.material] ?? 26 : PARTITION_CAPACITY;
+    const capacity = w.damaged ? baseCap * (1 - CRACK_CAPACITY_LOSS) : baseCap;
+    const utilization = bearing ? wl.kNm / capacity : 0.07;
+    const guess = planOnlyBearing(bp, w);
+    const carries = bearing
+      ? [...wl.from.map(f => bp.bays.find(b => b.id === f.bay)!.note.toLowerCase().replace(/^joists run [a-z-]+ ?/, '').trim() || f.bay), ...wl.point.map(p => bp.pointLoads.find(x => x.id === p.id)!.label.toLowerCase())]
+          .filter(x => x).join('; ') || 'roof joists'
+      : 'nothing structural (its own weight only)';
+    db.element.insert({ id: w.id, kind: 'wall', label: w.name, x0: w.a[0], z0: w.a[1], x1: w.b[0], z1: w.b[1], value: wl.kNm, unit: 'kN/m',
+      detail: JSON.stringify({ capacity, plan_only: guess }) });
+    db.wall.insert({
+      id: w.id, name: w.name, x0: w.a[0], z0: w.a[1], x1: w.b[0], z1: w.b[1],
+      kind: exterior ? 'exterior' : bearing ? 'bearing' : 'partition', material: w.material,
+      utilization: Math.round(utilization * 100) / 100, carries: carries.charAt(0).toUpperCase() + carries.slice(1),
+      health: w.damaged ? 'damaged' : 'ok', services: w.services, proposal: '', proposalState: '',
+      loadKnm: wl.kNm, capacityKnm: Math.round(capacity * 10) / 10, fireRated: !!w.fireRated,
+      planOnlyBearing: guess.bearing, planOnlyWhy: guess.why,
+    });
+    // load path: bay/point load → wall → foundation
+    for (const f of wl.from) db.elementEdge.insert({ id: 0n, fromId: w.id, toId: f.bay, rel: 'supports', value: f.kNm });
+    for (const p of wl.point) db.elementEdge.insert({ id: 0n, fromId: w.id, toId: p.id, rel: 'supports', value: p.kN });
+    if (bearing) db.elementEdge.insert({ id: 0n, fromId: 'FOUNDATION', toId: w.id, rel: 'supports', value: wl.kNm });
+    // topology: which rooms each wall bounds
+    for (const r of roomsBeside(ctx, { x0: w.a[0], z0: w.a[1], x1: w.b[0], z1: w.b[1] }))
+      db.elementEdge.insert({ id: 0n, fromId: w.id, toId: r.id, rel: r.kind === 'server' && w.fireRated ? 'separates_fire' : 'bounds', value: 0 });
+  }
+  for (const r of rooms) db.element.insert({ id: r.id, kind: 'room', label: r.name, x0: r.x0, z0: r.z0, x1: r.x1, z1: r.z1, value: 0, unit: '', detail: r.kind });
+}
+
+/** Everything that rests on an element, transitively (what loses support if it goes). */
+function dependents(ctx: Ctx, id: string): string[] {
+  const seen = new Set<string>(); const q = [id];
+  while (q.length) { const c = q.shift()!; for (const e of ctx.db.elementEdge.fromId.filter(c)) if (e.rel === 'supports' && !seen.has(e.toId)) { seen.add(e.toId); q.push(e.toId); } }
+  return [...seen];
+}
+
+/** What holds an element up, down to the foundation. */
+function loadPath(ctx: Ctx, id: string): string[][] {
+  const paths: string[][] = [];
+  const walk = (node: string, path: string[]) => {
+    const sups = [...ctx.db.elementEdge.toId.filter(node)].filter(e => e.rel === 'supports' || e.rel === 'carries').map(e => e.fromId);
+    if (!sups.length || node === 'FOUNDATION' || path.length > 6) { paths.push(path); return; }
+    for (const s of sups) walk(s, [...path, s]);
+  };
+  walk(id, [id]);
+  return paths;
+}
+
+// ================================================================ structure
+// Walls as structural elements: what is load-bearing, how loaded it is, what it carries,
+// what runs inside it, and its condition. Engineering checks below are simple, explainable
+// rules of thumb (span tables, unit costs) so every number the agents say is reproducible.
+
+function seedWalls(ctx: Ctx) {
+  ingestBlueprint(ctx, HARBOR_POINT);
+  seedEvalCases(ctx);
+  clearTable(ctx.db.evalResult.iter(), r => ctx.db.evalResult.id.delete(r.id));
+  runDeterministicEval(ctx);
+}
+
+const wallLen = (w: { x0: number; z0: number; x1: number; z1: number }) => Math.hypot(w.x1 - w.x0, w.z1 - w.z0);
+
+/** Rooms on either side of a wall. */
+function roomsBeside(ctx: Ctx, w: { x0: number; z0: number; x1: number; z1: number }) {
+  const vertical = Math.abs(w.x1 - w.x0) < 0.01;
+  return [...ctx.db.room.iter()].filter(r => {
+    if (vertical) return (Math.abs(r.x0 - w.x0) < 0.01 || Math.abs(r.x1 - w.x0) < 0.01) && r.z1 > Math.min(w.z0, w.z1) + 0.1 && r.z0 < Math.max(w.z0, w.z1) - 0.1;
+    return (Math.abs(r.z0 - w.z0) < 0.01 || Math.abs(r.z1 - w.z0) < 0.01) && r.x1 > Math.min(w.x0, w.x1) + 0.1 && r.x0 < Math.max(w.x0, w.x1) - 0.1;
+  });
+}
+
+type Verdict = 'go' | 'go_with_beam' | 'not_now' | 'not_allowed' | 'not_feasible';
+type Removal = { verdict: Verdict; structural: boolean; span: number; beam: string; posts: number; shoringDays: number; days: number;
+  cost: number; parts: { kind: string; title: string; detail: string; cost: number }[]; reasons: string[];
+  calc: { M: number; Sreq: number; Ireq: number; R: number } | null };
+const removalOk = (v: string) => v === 'go' || v === 'go_with_beam';
+
+/** Can this wall come out, and what would it take? Uses the framing analysis, code rules and condition. */
+function assessRemoval(ctx: Ctx, wallId: string): Removal {
+  const w = ctx.db.wall.id.find(wallId);
+  if (!w) throw new SenderError(`unknown wall '${wallId}'`);
+  const span = Math.round(wallLen(w) * 10) / 10;
+  const beside = roomsBeside(ctx, w);
+  const parts: Removal['parts'] = [];
+  const reasons: string[] = [];
+  const structural = w.kind !== 'partition';
+  let beam = '', posts = 0, shoringDays = 0, days = 2, calc: Removal['calc'] = null;
+  let verdict: Verdict = structural ? 'go_with_beam' : 'go';
+
+  parts.push({ kind: 'engineer_review', title: 'Structural engineer review', detail: `Stamped drawings for removing the ${w.name}.`, cost: structural ? 3200 : 900 });
+  if (structural) {
+    const sb = sizeBeam(w.loadKnm, span);
+    calc = { M: sb.M, Sreq: sb.Sreq, Ireq: sb.Ireq, R: sb.R };
+    reasons.push(`It carries ${w.loadKnm.toFixed(1)} kN/m, ${Math.round(w.utilization * 100)}% of its ${w.capacityKnm.toFixed(1)} kN/m capacity (${w.carries.toLowerCase()}).`);
+    if (sb.shape) {
+      beam = sb.shape; posts = 2; shoringDays = 3; days = 10 + Math.ceil(span);
+      reasons.push(`A ${span} m opening puts M = ${sb.M} kN·m on a new beam: S ≥ ${sb.Sreq} cm³ and I ≥ ${sb.Ireq} cm⁴ (deflection L/360) → ${beam}, ${sb.R} kN at each post.`);
+      parts.push({ kind: 'temporary_shoring', title: 'Temporary shoring', detail: `Shore the roof framing for ${shoringDays} days while the wall comes out.`, cost: 4800 });
+      parts.push({ kind: 'install_beam', title: `Install ${beam} steel beam`, detail: `${span} m clear span, ${sb.R} kN per post, new footings.`, cost: Math.round(900 * span + span * sb.kgPerM * 3 + 6500) });
+    } else {
+      verdict = 'not_feasible';
+      reasons.push(`A ${span} m clear span needs M = ${sb.M} kN·m (S ≥ ${sb.Sreq} cm³), beyond any single rolled beam in the table; it would need intermediate columns.`);
+    }
+  } else {
+    parts.push({ kind: 'remove_partition', title: 'Remove partition', detail: `Demolish ${span} m of ${w.material.toLowerCase()}, patch floor and ceiling.`, cost: Math.round(180 * span + 900) });
+    reasons.push(`It is a non-structural partition: the framing analysis puts no roof load on it.`);
+  }
+  if (w.services) {
+    days += 2;
+    parts.push({ kind: 'reroute_services', title: 'Reroute what runs inside', detail: `Inside the wall: ${w.services.toLowerCase()}; reroute it first.`, cost: 4100 });
+    reasons.push(`Inside it: ${w.services.toLowerCase()}.`);
+  }
+  if (beside.some(r => r.kind === 'server')) {
+    parts.push({ kind: 'dust_containment', title: 'Dust containment for the server room', detail: 'Sealed enclosure and negative air while work is next to live racks.', cost: 3500 });
+    reasons.push('A live server room is on one side: dust containment is required.');
+  }
+  if (w.fireRated && beside.some(r => r.kind === 'server')) { verdict = 'not_allowed'; reasons.push('It is the server room\'s 1-hour fire separation; code requires an equivalent rated wall, so it cannot simply come out.'); }
+  if (w.kind === 'exterior') { verdict = 'not_now'; reasons.push('Exterior walls hold the facade and lateral bracing; opening one is a separate facade project.'); }
+  if (w.health === 'damaged') { verdict = 'not_now'; reasons.push('It is already cracking from Chiller 2 vibration (capacity reduced 15%); repair and isolate the chiller before any change.'); }
+  return { verdict, structural, span, beam, posts, shoringDays, days, cost: parts.reduce((x, p) => x + p.cost, 0), parts, reasons, calc };
+}
+
+/** Crack growth driven by Chiller 2 vibration (rule of thumb: 0.02 mm/week per mm/s above normal). */
+function crackGrowth(ctx: Ctx) {
+  const ch2 = ctx.db.asset.id.find('CH-2')!;
+  const repaired = ch2.health === 'repair';
+  const excess = Math.max(0, ch2.reading - ch2.baseline);
+  const now = 0.4, limit = 1.5;
+  const perWeek = repaired ? 0.002 : 0.02 * excess;
+  const weeks = perWeek > 0.0001 ? (limit - now) / perWeek : 999;
+  return { now, limit, perWeek: Math.round(perWeek * 1000) / 1000, weeks: Math.round(weeks), emergencyCost: 28000, plannedCost: 6500 };
+}
+
+// ---- scripted ops: structural engineer inside the cascade investigation (OPS indexes 21, 22)
+const STRUCT_OPS: Op[] = [
+  { agent: 'structural', tool: 'get_structure', why: 'Which walls carry load around Chiller 2?', target: 'MECH' },
+  { agent: 'structural', tool: 'assess_crack_growth', why: 'How fast are the pad cracks growing?', target: 'MECH' },
+];
+
+function runStructOp(ctx: Ctx, invId: bigint, index: number): { result: string; status?: string } {
+  if (index === 0) {
+    claim(ctx, invId, 'structural');
+    const w = ctx.db.wall.id.find('W-MECH-E')!;
+    postEvidence(ctx, invId, 'structural', `The ${w.name} carries ${w.loadKnm.toFixed(1)} kN/m including the cooling tower; cracking cut its capacity to ${w.capacityKnm.toFixed(1)} kN/m, so it now runs at ${Math.round(w.utilization * 100)}%.`, 'wall', w.id, 0.75, 'CH-2', true);
+    return { result: `${w.id} ${w.loadKnm.toFixed(1)} kN/m · ${Math.round(w.utilization * 100)}% of cracked capacity` };
+  }
+  const g = crackGrowth(ctx);
+  postEvidence(ctx, invId, 'structural', `Pad cracks are ${g.now} mm wide and growing ${g.perWeek} mm/week with the vibration; they reach the ${g.limit} mm repair limit in about ${g.weeks} weeks (${money(g.emergencyCost)} emergency vs ${money(g.plannedCost)} now).`, 'issue', 'ISS-2', 0.65, 'CH-2', true);
+  subtaskDone(ctx, invId, 'structural');
+  return { result: `${g.now} → ${g.limit} mm in ~${g.weeks} weeks at ${g.perWeek} mm/wk` };
+}
+
+// ---- scripted ops: "what if we remove this wall?"
+const WALL_OPS: Op[] = [
+  { agent: 'planner', tool: 'get_investigation', why: 'Reading the proposed change' },
+  { agent: 'planner', tool: 'create_subtasks', why: 'Splitting the work across the team' },
+  { agent: 'structural', tool: 'get_structure', why: 'Is this wall load-bearing?' },
+  { agent: 'historian', tool: 'get_inspection_issues', why: 'Any damage in or near this wall?' },
+  { agent: 'lease', tool: 'get_dependents', why: 'Who is on either side, and who is disrupted?' },
+  { agent: 'structural', tool: 'assess_wall_removal', why: 'What would it take to remove it?' },
+  { agent: 'critic', tool: 'post_critique', why: 'Checking the plan for unchecked assumptions' },
+  { agent: 'structural', tool: 'check_wall_services', why: 'What runs inside the wall?' },
+  { agent: 'critic', tool: 'post_critique', why: 'Re-checking with the new evidence' },
+  { agent: 'planner', tool: 'post_action_candidate', why: 'Turning the assessment into a plan' },
+  { agent: 'planner', tool: 'write_decision', why: 'Writing the recommendation' },
+  { agent: 'narrator', tool: 'post_answer', why: 'Explaining it to each person' },
+];
+
+function wallOf(ctx: Ctx, invId: bigint) {
+  const inv = ctx.db.investigation.id.find(invId)!;
+  return ctx.db.wall.id.find(inv.subject)!;
+}
+
+function runWallOp(ctx: Ctx, invId: bigint, index: number): { result: string; status?: string } {
+  const db = ctx.db, w = wallOf(ctx, invId);
+  const a = assessRemoval(ctx, w.id);
+  const beside = roomsBeside(ctx, w);
+  switch (index) {
+    case 0: return { result: `Remove the ${w.name} (${a.span} m)` };
+    case 1: {
+      for (const [agent, goal] of [['structural', `Is ${w.id} load-bearing, and what would removing it take?`], ['historian', `Find damage in or near ${w.id}`],
+        ['lease', 'Who is disrupted on either side, and for how long?'], ['critic', 'Challenge the plan']] as const)
+        db.subtask.insert({ id: 0n, invId, agent, goal, dependsOn: agent === 'critic' ? 'structural' : '', status: agent === 'critic' ? 'waiting' : 'ready' });
+      return { result: '4 subtasks · structural, history and tenants in parallel' };
+    }
+    case 2: {
+      claim(ctx, invId, 'structural');
+      postEvidence(ctx, invId, 'structural', `${w.name}: ${w.kind === 'partition' ? 'non-structural partition' : w.kind === 'exterior' ? 'exterior bearing wall' : 'load-bearing wall'}, ${w.material.toLowerCase()}, ${Math.round(w.utilization * 100)}% of capacity; carries ${w.carries.toLowerCase()}.`, 'wall', w.id, 0.9, w.id, w.kind === 'partition');
+      return { result: `${w.kind === 'partition' ? 'partition' : 'load-bearing'} · ${Math.round(w.utilization * 100)}% · ${w.material}` };
+    }
+    case 3: {
+      claim(ctx, invId, 'historian');
+      const near = [...db.issue.iter()].filter(i => i.status === 'open' && beside.some(r => r.id === i.roomId) && i.kind === 'structural');
+      const fact = w.health === 'damaged' ? `This wall is already cracking (ISS-2: cracks from the Chiller 2 pad).` : near.length ? `Nearby: ${near.map(i => i.title.toLowerCase()).join(', ')}.` : 'No structural findings in or next to this wall.';
+      postEvidence(ctx, invId, 'historian', fact, 'wall', w.id, 0.6, w.id, w.health !== 'damaged');
+      subtaskDone(ctx, invId, 'historian');
+      return { result: fact };
+    }
+    case 4: {
+      claim(ctx, invId, 'lease');
+      const tenants = [...new Set(beside.map(r => r.tenantId).filter(t => t))].map(id => db.tenant.id.find(id)!);
+      const fact = `${beside.map(r => r.name).join(' and ')} are on either side${tenants.length ? `; ${tenants.map(t => t.name).join(', ')} would work around ${a.days} days of construction` : ''}.`;
+      postEvidence(ctx, invId, 'lease', fact, 'room', beside[0]?.id ?? 'CORR', 0.8, w.id, true);
+      subtaskDone(ctx, invId, 'lease');
+      emit(ctx, { kind: 'highlight', ids: beside.map(r => r.id) });
+      return { result: `${beside.map(r => r.name).join(' + ')} · ${a.days} days of work` };
+    }
+    case 5: {
+      const verdict = a.verdict === 'go' ? 'Can be removed' : a.verdict === 'go_with_beam' ? `Removable with a ${a.beam} beam on ${a.posts} posts`
+        : a.verdict === 'not_allowed' ? 'Not allowed by code' : a.verdict === 'not_feasible' ? 'Not feasible as one span' : 'Not recommended now';
+      postEvidence(ctx, invId, 'structural', `${verdict}: ${a.reasons[a.calc ? 1 : 0] ?? a.reasons[0]}`, 'wall', w.id, 0.85, w.id, removalOk(a.verdict));
+      db.wall.id.update({ ...db.wall.id.find(w.id)!, proposalState: 'evaluating' });
+      return { result: `${verdict} · ${money(a.cost)} · ${a.days} days` };
+    }
+    case 6: {
+      claim(ctx, invId, 'critic');
+      const text = w.services ? 'Has anyone checked what runs inside the wall before we cut it?' : a.structural ? 'Who carries the load while the wall is out?' : 'Is the wall really non-structural above the ceiling?';
+      db.critique.insert({ id: 0n, invId, verdict: 'revise', text });
+      return { result: `REVISE: ${text}`, status: 'revise' };
+    }
+    case 7: {
+      const fact = w.services ? `Inside the wall: ${w.services.toLowerCase()}. Rerouting adds ${money(4100)} and 2 days.` : a.structural ? `Temporary shoring for ${a.shoringDays} days carries the load while the beam goes in.` : 'Above the ceiling the partition stops at the deck with a slip track: no load transfer.';
+      postEvidence(ctx, invId, 'structural', fact, 'wall', w.id, 0.8, w.id, true);
+      subtaskDone(ctx, invId, 'structural');
+      return { result: fact };
+    }
+    case 8: {
+      db.critique.insert({ id: 0n, invId, verdict: 'approve', text: 'Load path, services and disruption are covered. Approved.' });
+      subtaskDone(ctx, invId, 'critic');
+      return { result: 'APPROVED: load path, services and disruption covered' };
+    }
+    case 9: {
+      const rec = removalOk(a.verdict);
+      a.parts.forEach((p, i) => db.actionCandidate.insert({ id: 0n, invId, kind: p.kind, target: w.id, title: p.title, detail: p.detail, cost: p.cost, saved: 0, rank: i + 1, recommended: rec, status: 'proposed' }));
+      if (!rec && w.health === 'damaged') {
+        db.actionCandidate.insert({ id: 0n, invId, kind: 'structural_repair', target: 'MECH', title: 'Isolate Chiller 2 and inject the cracks first', detail: 'Vibration isolation pads plus epoxy crack injection, then re-assess.', cost: 6500, saved: 21500, rank: 0, recommended: true, status: 'proposed' });
+      }
+      return { result: `${a.parts.length} steps · ${money(a.cost)} total` };
+    }
+    case 10: {
+      const verdict = a.verdict === 'go' ? `Yes: it is a partition. ${money(a.cost)}, ${a.days} days.` : a.verdict === 'go_with_beam' ? `Yes, with a ${a.beam} steel beam on two posts: ${money(a.cost)}, ${a.days} days, engineer stamp required.` : `No. ${a.reasons[a.reasons.length - 1]}`;
+      db.decision.insert({ id: 0n, invId, rootCause: `Remove ${w.name}`, likelihood: 1, summary: `${verdict} ${a.reasons.slice(0, 2).join(' ')}` });
+      db.wall.id.update({ ...db.wall.id.find(w.id)!, proposalState: removalOk(a.verdict) ? 'recommended' : 'not_recommended' });
+      return { result: verdict };
+    }
+    case 11: {
+      const tech = !removalOk(a.verdict)
+        ? `Don't open the ${w.name}. ${a.reasons[a.reasons.length - 1]}`
+        : `The ${w.name} is ${a.structural ? 'load-bearing' : 'a partition'}. ${w.services ? `Reroute the ${w.services.toLowerCase()} first. ` : ''}${a.structural ? `Shore it for ${a.shoringDays} days, then set the ${a.beam} beam.` : 'Then it can come out in about two days.'}`;
+      const mgr = !removalOk(a.verdict)
+        ? `Removing the ${w.name} isn't recommended right now: ${a.reasons[a.reasons.length - 1]} Approve the repair plan first.`
+        : `We can remove the ${w.name} for about ${money(a.cost)} over ${a.days} days${a.structural ? `, with a ${a.beam} steel beam carrying the load` : ''}. Approve to schedule it.`;
+      db.answer.insert({ id: 0n, invId, role: 'technician', byNemotron: false, text: tech });
+      db.answer.insert({ id: 0n, invId, role: 'manager', byNemotron: false, text: mgr });
+      const inv = db.investigation.id.find(invId)!;
+      db.investigation.id.update({ ...inv, status: 'awaiting_approval' });
+      return { result: 'answers posted for technician and manager' };
+    }
+  }
+  return { result: '' };
+}
+
+/** Open a "what if we change this wall?" investigation. */
+export const proposeWallChange = spacetimedb.reducer({ wallId: t.string(), change: t.string() }, (ctx, { wallId, change }) => {
+  const w = ctx.db.wall.id.find(wallId);
+  if (!w) throw new SenderError(`unknown wall '${wallId}'`);
+  if (change !== 'remove') throw new SenderError(`unsupported change '${change}'`);
+  clearTable(ctx.db.agentTick.iter(), r => ctx.db.agentTick.scheduledId.delete(r.scheduledId));
+  for (const other of [...ctx.db.wall.iter()]) if (other.proposal) ctx.db.wall.id.update({ ...other, proposal: '', proposalState: '' });
+  ctx.db.wall.id.update({ ...ctx.db.wall.id.find(wallId)!, proposal: 'remove', proposalState: 'evaluating' });
+  openInvestigation(ctx, `What if we remove the ${w.name}?`, 'ask', me(ctx).name, 'structural_change', wallId);
+});
+
+/** Free-text questions that ask to remove a wall become structural-change investigations. */
+function wallFromText(ctx: Ctx, text: string): string | null {
+  const q = text.toLowerCase();
+  if (!/(remove|knock|take (out|down)|open up|demolish|tear down)/.test(q) || !/wall/.test(q)) return null;
+  let best: string | null = null, score = 0;
+  for (const w of ctx.db.wall.iter()) {
+    const words = w.name.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(x => x.length > 2 && x !== 'wall');
+    const s = words.filter(x => q.includes(x)).length;
+    if (s > score) { score = s; best = w.id; }
+  }
+  return score >= 2 ? best : null;
+}
 
 // ---------------------------------------------------------------- Nemotron narrator (optional)
 // If an NVIDIA API key is stored (INSERT INTO secret VALUES ('nvidia_api_key', '...')), the
@@ -1068,6 +1600,7 @@ const ACTION_KINDS: Record<string, { cost: number; target: string; title: string
   load_shift: { cost: 150, target: 'CH-1', title: 'Shift server room to Chiller 1', detail: 'Send Chiller 1 spare capacity to Server Room 300 first.' },
   tenant_notice: { cost: 0, target: 'SRV300', title: 'Notify Northwind Analytics', detail: 'Advance notice of maintenance; halves the uptime penalty if anything slips.' },
   portable_cooling: { cost: 1200, target: 'SRV300', title: 'Rent portable cooling', detail: '15-ton unit in Server Room 300 for 24 h.' },
+  structural_repair: { cost: 6500, target: 'MECH', title: 'Isolate Chiller 2 and inject the wall cracks', detail: 'Vibration isolation pads plus epoxy crack injection in the Mechanical east wall.' },
 };
 
 function secretOf(ctx: Ctx, key: string) { return ctx.db.secret.key.find(key)?.value ?? ''; }
@@ -1102,6 +1635,7 @@ function planFromActions(actions: unknown[]): Plan {
 
 // ---------------------------------------------------------------- tools
 
+const WALL_KINDS = ['engineer_review', 'temporary_shoring', 'install_beam', 'remove_partition', 'reroute_services', 'dust_containment'];
 const W = { why: { type: 'string', description: 'One plain sentence under 15 words: what you are checking. Shown live in VR.' } };
 const ASSET = { type: 'string', description: 'Asset id, e.g. CH-2' };
 const ACTIONS = { type: 'array', items: { type: 'string', enum: Object.keys(ACTION_KINDS) }, description: 'Actions to apply; empty = do nothing' };
@@ -1109,9 +1643,15 @@ const ACTIONS = { type: 'array', items: { type: 'string', enum: Object.keys(ACTI
 const TOOLS: Record<string, ToolDef> = {
   get_investigation: { name: 'get_investigation', description: 'The trigger, status and subtasks of this investigation.', params: { ...W } },
   get_building_summary: { name: 'get_building_summary', description: 'Rooms, assets, tenants and how cooling flows.', params: { ...W } },
+  get_structure: { name: 'get_structure', description: 'Walls with type (exterior, bearing, partition), material, % of capacity used, what they carry, condition and what runs inside. Filter by wall id or room id.', params: { ...W, wall_id: { type: 'string' }, room_id: { type: 'string' } } },
+  assess_wall_removal: { name: 'assess_wall_removal', description: 'Engineering check for removing a wall: verdict, beam size, posts, shoring, cost, days and reasons.', params: { ...W, wall_id: { type: 'string' } }, required: ['why', 'wall_id'] },
+  assess_crack_growth: { name: 'assess_crack_growth', description: 'How fast the chiller-pad wall cracks are growing with the current vibration, and when they reach the repair limit.', params: { ...W } },
+  get_load_path: { name: 'get_load_path', description: 'What holds an element up, down to the foundation (bays, rooftop loads RT-1/RT-2, walls), with loads.', params: { ...W, element_id: { type: 'string' } }, required: ['why', 'element_id'] },
+  check_code: { name: 'check_code', description: 'Code checks for changing a wall: fire separation, exterior/lateral role, condition.', params: { ...W, wall_id: { type: 'string' } }, required: ['why', 'wall_id'] },
+  check_wall_services: { name: 'check_wall_services', description: 'Ducts, pipes and cables that run inside a wall and must be rerouted before it changes.', params: { ...W, wall_id: { type: 'string' } }, required: ['why', 'wall_id'] },
   post_evidence: { name: 'post_evidence', description: 'Post one finding to the blackboard. Must cite an existing row.', params: { ...W,
     fact: { type: 'string', description: 'One sentence, numbers only from tool results' },
-    source_table: { type: 'string', enum: ['asset', 'room', 'work_order', 'tenant', 'past_incident', 'sensor_reading', 'scenario', 'dependency', 'issue'] },
+    source_table: { type: 'string', enum: ['asset', 'room', 'work_order', 'tenant', 'past_incident', 'sensor_reading', 'scenario', 'dependency', 'issue', 'wall'] },
     source_row: { type: 'string', description: 'Row id in that table (asset id for sensor_reading/dependency)' },
     confidence: { type: 'number', description: '0..1' },
     about_asset: { type: 'string', description: 'Asset the finding is about' },
@@ -1120,7 +1660,7 @@ const TOOLS: Record<string, ToolDef> = {
   complete_subtask: { name: 'complete_subtask', description: 'Finish your subtask with a one-sentence summary.', params: { ...W, summary: { type: 'string' } }, required: ['why', 'summary'] },
   create_subtasks: { name: 'create_subtasks', description: 'Create 4-8 subtasks for the specialists.', params: { ...W,
     subtasks: { type: 'array', items: { type: 'object', properties: {
-      agent_type: { type: 'string', enum: ['signal', 'historian', 'lease', 'simulation', 'critic'] },
+      agent_type: { type: 'string', enum: ['signal', 'historian', 'lease', 'structural', 'simulation', 'critic'] },
       goal: { type: 'string' }, depends_on: { type: 'array', items: { type: 'string' } } }, required: ['agent_type', 'goal'] } } },
     required: ['why', 'subtasks'] },
   post_hypothesis: { name: 'post_hypothesis', description: 'Name one possible root cause (max 3 per investigation).', params: { ...W,
@@ -1128,7 +1668,7 @@ const TOOLS: Record<string, ToolDef> = {
     supporting_evidence_ids: { type: 'array', items: { type: 'integer' } },
     contradicting_evidence_ids: { type: 'array', items: { type: 'integer' } } }, required: ['why', 'asset_id', 'mechanism'] },
   post_action_candidate: { name: 'post_action_candidate', description: 'Propose one action. Costs come from the price list, not from you.', params: { ...W,
-    kind: { type: 'string', enum: Object.keys(ACTION_KINDS) }, rationale: { type: 'string' } }, required: ['why', 'kind'] },
+    kind: { type: 'string', enum: [...Object.keys(ACTION_KINDS), ...WALL_KINDS] }, rationale: { type: 'string' } }, required: ['why', 'kind'] },
   write_decision: { name: 'write_decision', description: 'Final decision once the Critic approved.', params: { ...W,
     root_cause_asset: ASSET, summary: { type: 'string', description: 'Root cause, evidence chain, ranked actions' },
     what_would_change_my_mind: { type: 'string' } }, required: ['why', 'root_cause_asset', 'summary'] },
@@ -1138,6 +1678,7 @@ const TOOLS: Record<string, ToolDef> = {
   check_sensor_health: { name: 'check_sensor_health', description: 'Is a sensor trustworthy? Compares noise and a sibling sensor.', params: { ...W, asset_id: ASSET }, required: ['why', 'asset_id'] },
   get_asset: { name: 'get_asset', description: 'Asset registry row: age, expected life, capacity, health.', params: { ...W, asset_id: ASSET }, required: ['why', 'asset_id'] },
   get_work_orders: { name: 'get_work_orders', description: 'Open and closed tickets for an asset.', params: { ...W, asset_id: ASSET }, required: ['why', 'asset_id'] },
+  get_field_notes: { name: 'get_field_notes', description: 'Observations the people on site have noted (shared notes only).', params: { ...W } },
   get_inspection_issues: { name: 'get_inspection_issues', description: 'Open inspection findings (structural, water, mechanical, electrical), optionally for one asset.', params: { ...W, asset_id: { type: 'string', description: 'optional asset id' } } },
   search_past_incidents: { name: 'search_past_incidents', description: 'Search past incidents by keyword.', params: { ...W, query: { type: 'string' } }, required: ['why', 'query'] },
   get_dependents: { name: 'get_dependents', description: 'Everything an asset feeds: air handlers, rooms, tenants.', params: { ...W, asset_id: ASSET }, required: ['why', 'asset_id'] },
@@ -1149,7 +1690,7 @@ const TOOLS: Record<string, ToolDef> = {
   get_evidence_chain: { name: 'get_evidence_chain', description: 'Hypotheses, evidence, ranked actions, scenarios and past critiques.', params: { ...W } },
   post_critique: { name: 'post_critique', description: 'Approve, or send back with at most 3 specific requests.', params: { ...W,
     verdict: { type: 'string', enum: ['approve', 'revise'] }, summary: { type: 'string' },
-    requests: { type: 'array', items: { type: 'object', properties: { agent_type: { type: 'string', enum: ['signal', 'historian', 'lease', 'simulation'] }, request: { type: 'string' } }, required: ['agent_type', 'request'] } } },
+    requests: { type: 'array', items: { type: 'object', properties: { agent_type: { type: 'string', enum: ['signal', 'historian', 'lease', 'structural', 'simulation'] }, request: { type: 'string' } }, required: ['agent_type', 'request'] } } },
     required: ['why', 'verdict', 'summary'] },
   post_answer: { name: 'post_answer', description: 'Spoken answer for one person, at most 3 short sentences.', params: { ...W,
     role: { type: 'string', enum: ['technician', 'manager'] }, text: { type: 'string' } }, required: ['why', 'role', 'text'] },
@@ -1162,6 +1703,7 @@ const AGENT_TOOLS: Record<string, string[]> = {
   signal: ['get_sensor_history', 'detect_anomaly', 'forecast_threshold', 'check_sensor_health', 'post_evidence', 'complete_subtask'],
   historian: ['get_asset', 'get_work_orders', 'get_inspection_issues', 'search_past_incidents', 'post_evidence', 'complete_subtask'],
   lease: ['get_dependents', 'get_tenants', 'get_lease_terms', 'post_evidence', 'complete_subtask'],
+  structural: ['get_structure', 'get_load_path', 'get_inspection_issues', 'assess_crack_growth', 'assess_wall_removal', 'check_code', 'check_wall_services', 'post_evidence', 'complete_subtask'],
   hypothesize: ['get_evidence_chain', 'post_hypothesis'],
   simulate: ['simulate_cascade', 'run_risk_estimate', 'post_evidence', 'complete_subtask'],
   propose: ['get_evidence_chain', 'post_action_candidate'],
@@ -1197,12 +1739,12 @@ function execTool(tx: Ctx, invId: bigint, agent: string, call: Call): { out: unk
       for (const sRaw of subs) {
         const sObj = (sRaw ?? {}) as Json;
         const agentType = str(sObj.agent_type);
-        if (!['signal', 'historian', 'lease', 'simulation', 'critic'].includes(agentType)) continue;
+        if (!['signal', 'historian', 'lease', 'structural', 'simulation', 'critic'].includes(agentType)) continue;
         db.subtask.insert({ id: 0n, invId, agent: agentType, goal: str(sObj.goal).slice(0, 200), dependsOn: arr(sObj.depends_on).map(x => str(x)).join(','),
-          status: ['signal', 'historian', 'lease'].includes(agentType) ? 'ready' : 'waiting' });
+          status: ['signal', 'historian', 'lease', 'structural'].includes(agentType) ? 'ready' : 'waiting' });
         n++;
       }
-      for (const need of ['signal', 'historian', 'lease'])
+      for (const need of parallelGroup(inv.kind))
         if (![...db.subtask.iter()].some(s => s.invId === invId && s.agent === need))
           db.subtask.insert({ id: 0n, invId, agent: need, goal: `Gather ${need} evidence for: ${inv.trigger}`, dependsOn: '', status: 'ready' });
       if (n === 0) throw new Error('no valid subtasks; agent_type must be signal, historian, lease, simulation or critic');
@@ -1238,7 +1780,17 @@ function execTool(tx: Ctx, invId: bigint, agent: string, call: Call): { out: unk
       return { out: { hypothesis_id: Number(h.id) }, line: `${id}: ${str(a.mechanism)}` };
     }
     case 'post_action_candidate': {
-      const kind = str(a.kind), k = ACTION_KINDS[kind];
+      const kind = str(a.kind);
+      if (WALL_KINDS.includes(kind)) {
+        // wall-change steps are priced by the structural assessment, never by the model
+        const part = inv.subject ? assessRemoval(tx, inv.subject).parts.find(p => p.kind === kind) : undefined;
+        if (!part) throw new Error(`${kind} does not apply to this change`);
+        if ([...db.actionCandidate.iter()].some(x => x.invId === invId && x.kind === kind)) return { out: { ok: true, note: 'already proposed' }, line: `${part.title} (already proposed)` };
+        db.actionCandidate.insert({ id: 0n, invId, kind, target: inv.subject, title: part.title, detail: part.detail, cost: part.cost, saved: 0, rank: Number(db.actionCandidate.count()) + 1,
+          recommended: removalOk(assessRemoval(tx, inv.subject).verdict), status: 'proposed' });
+        return { out: { ok: true, cost: part.cost }, line: `${part.title} · ${money(part.cost)}` };
+      }
+      const k = ACTION_KINDS[kind];
       if (!k) throw new Error(`kind must be one of ${Object.keys(ACTION_KINDS).join(', ')}`);
       if ([...db.actionCandidate.iter()].some(x => x.invId === invId && x.kind === kind)) return { out: { ok: true, note: 'already proposed' }, line: `${k.title} (already proposed)` };
       db.actionCandidate.insert({ id: 0n, invId, kind, target: k.target, title: k.title, detail: str(a.rationale) ? str(a.rationale).slice(0, 140) : k.detail, cost: k.cost, saved: 0, rank: 0, recommended: false, status: 'proposed' });
@@ -1293,6 +1845,46 @@ function execTool(tx: Ctx, invId: bigint, agent: string, call: Call): { out: unk
       const w = [...db.workOrder.iter()].filter(o => o.assetId === x.id).map(o => ({ id: o.id, title: o.title, status: o.status, age_days: o.ageDays }));
       const open = w.filter(o => o.status === 'open');
       return { out: { asset: x.id, work_orders: w }, line: `${open.length} open on ${x.id}${open.length ? ': ' + open.map(o => o.id).join(', ') : ''}` };
+    }
+    case 'get_structure': {
+      const wid = str(a.wall_id), rid = str(a.room_id);
+      const rows = [...db.wall.iter()].filter(w2 => (!wid || w2.id === wid) && (!rid || roomsBeside(tx, w2).some(r => r.id === rid)));
+      if (wid && !rows.length) throw new Error(`unknown wall. Valid: ${[...db.wall.iter()].map(x => x.id).join(', ')}`);
+      const out = rows.map(w2 => ({ id: w2.id, name: w2.name, kind: w2.kind, material: w2.material, load_kN_per_m: w2.loadKnm, capacity_kN_per_m: w2.capacityKnm, utilization: w2.utilization, carries: w2.carries, condition: w2.health, fire_rated: w2.fireRated, inside: w2.services, rooms: roomsBeside(tx, w2).map(r => r.id) }));
+      return { out: { walls: out }, line: out.slice(0, 3).map(w2 => `${w2.id} ${w2.kind} ${Math.round(w2.utilization * 100)}%`).join(' · ') };
+    }
+    case 'assess_wall_removal': {
+      const r = assessRemoval(tx, str(a.wall_id));
+      return { out: r, line: `${r.verdict === 'go' ? 'removable' : r.verdict === 'go_with_beam' ? `needs ${r.beam} beam` : r.verdict.replace('_', ' ')} · ${money(r.cost)} · ${r.days} days` };
+    }
+    case 'assess_crack_growth': {
+      const g = crackGrowth(tx);
+      return { out: { issue: 'ISS-2', width_mm: g.now, limit_mm: g.limit, growth_mm_per_week: g.perWeek, weeks_to_limit: g.weeks, emergency_repair_usd: g.emergencyCost, planned_repair_usd: g.plannedCost },
+        line: `${g.now} → ${g.limit} mm in ~${g.weeks} weeks` };
+    }
+    case 'get_load_path': {
+      const id = str(a.element_id);
+      if (!db.element.id.find(id)) throw new Error(`unknown element. Try a wall id, RT-1, RT-2 or a bay id`);
+      const paths = loadPath(tx, id);
+      const direct = [...db.elementEdge.toId.filter(id)].filter(e => e.rel === 'supports' || e.rel === 'carries').map(e => ({ by: e.fromId, value: e.value }));
+      return { out: { element: id, held_up_by: direct, paths }, line: `${id} ← ${direct.map(d => d.by).join(', ')}` };
+    }
+    case 'check_code': {
+      const w2 = db.wall.id.find(str(a.wall_id));
+      if (!w2) throw new Error('unknown wall');
+      const r = assessRemoval(tx, w2.id);
+      const issues = [w2.fireRated && roomsBeside(tx, w2).some(x => x.kind === 'server') ? 'required 1-hour fire separation for the server room' : '',
+        w2.kind === 'exterior' ? 'exterior wall: facade and lateral bracing' : '', w2.health === 'damaged' ? 'cracked: capacity reduced 15%' : ''].filter(x => x);
+      return { out: { wall: w2.id, blockers: issues, verdict: r.verdict }, line: issues.length ? issues.join('; ') : 'no code blockers' };
+    }
+    case 'check_wall_services': {
+      const w2 = db.wall.id.find(str(a.wall_id));
+      if (!w2) throw new Error('unknown wall');
+      return { out: { wall: w2.id, inside: w2.services || 'nothing', reroute_cost_usd: w2.services ? 4100 : 0 }, line: w2.services ? `${w2.services} inside` : 'nothing runs inside' };
+    }
+    case 'get_field_notes': {
+      const notes = [...db.fieldNote.iter()].filter(n => !n.isPrivate).map(n => ({ id: Number(n.id), by: `${n.authorName} (${n.role})`, where: n.targetId || 'on site', text: n.text }));
+      return { out: { notes }, line: notes.length ? `${notes.length} field notes: "${notes[notes.length - 1].text.slice(0, 60)}"` : 'no field notes yet' };
     }
     case 'get_inspection_issues': {
       const only = str(a.asset_id);
@@ -1384,10 +1976,10 @@ function execTool(tx: Ctx, invId: bigint, agent: string, call: Call): { out: unk
     }
     case 'post_critique': {
       const verdict = str(a.verdict) === 'revise' ? 'revise' : 'approve';
-      const reqs = arr(a.requests).slice(0, 3).map(r => r as Json).filter(r => ['signal', 'historian', 'lease', 'simulation'].includes(str(r.agent_type)));
+      const reqs = arr(a.requests).slice(0, 3).map(r => r as Json).filter(r => ['signal', 'historian', 'lease', 'structural', 'simulation'].includes(str(r.agent_type)));
       const text = verdict === 'revise' && reqs.length ? reqs.map(r => str(r.request)).join(' ') : str(a.summary);
       db.critique.insert({ id: 0n, invId, verdict: verdict === 'revise' && reqs.length ? 'revise' : 'approve', text: text.slice(0, 300) });
-      if (verdict === 'revise' && reqs.length && inv.critiqueRounds < 2) {
+      if (verdict === 'revise' && reqs.length && inv.critiqueRounds < 1) {
         for (const r of reqs) {
           const st = [...db.subtask.iter()].find(x => x.invId === invId && x.agent === str(r.agent_type));
           if (st) db.subtask.id.update({ ...st, status: 'reopened', goal: str(r.request).slice(0, 200) });
@@ -1429,28 +2021,38 @@ function cfgOf(tx: Ctx): AiCfg | null {
 }
 
 function thinkPrefix(model: string, think: boolean): string {
+  if (/nemotron-3/.test(model)) return ''; // Nemotron 3.x: chat_template_kwargs.enable_thinking
   if (/super-49b-v1$/.test(model) || /nemotron-70b|ultra-253b-v1$/.test(model)) return think ? 'detailed thinking on' : 'detailed thinking off';
   return think ? '/think' : '/no_think';
 }
 
 type ChatOut = { content: string; reasoning: string; calls: Call[]; raw: Json };
 
-function chat(ctx: PCtx, cfg: AiCfg, model: string, messages: Json[], tools: ToolDef[], think: boolean): ChatOut {
+function chat(ctx: PCtx, cfg: AiCfg, model: string, messages: Json[], tools: ToolDef[], think: boolean, meta: { invId: bigint; agent: string } = { invId: 0n, agent: '' }, force?: string): ChatOut {
+  const t0 = ctx.withTx(tx => tx.timestamp.microsSinceUnixEpoch);
+  const log = (ok: boolean, usage: Json | undefined) => ctx.withTx(tx => {
+    const ms = Number(tx.timestamp.microsSinceUnixEpoch - t0) / 1000;
+    tx.db.llmCall.insert({ id: 0n, invId: meta.invId, agent: meta.agent, model, ms, ok,
+      promptTokens: Math.round(num(usage?.prompt_tokens)), completionTokens: Math.round(num(usage?.completion_tokens)) });
+  });
   const body = {
-    model, messages, temperature: think ? 0.4 : 0.2, top_p: 0.95, max_tokens: think ? 2048 : 900,
+    model, messages, temperature: think ? 0.6 : 0.2, top_p: 0.95, max_tokens: think ? 4096 : 1200,
+    ...(/nemotron-3/.test(model) ? { chat_template_kwargs: { enable_thinking: think } } : {}),
     tools: tools.map(td => ({ type: 'function', function: { name: td.name, description: td.description,
       parameters: { type: 'object', properties: td.params, required: td.required ?? ['why'] } } })),
-    tool_choice: 'auto',
+    tool_choice: force ? { type: 'function', function: { name: force } } : 'auto',
   };
   const res = ctx.http.fetch(`${cfg.base}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${cfg.key}` },
     body: JSON.stringify(body),
-    timeout: TimeDuration.fromMillis(60000),
+    timeout: TimeDuration.fromMillis(think ? 45000 : model === cfg.small ? 20000 : 30000),
   });
   const text = res.text();
-  if (res.status !== 200) throw new Error(`Nemotron HTTP ${res.status}: ${text.slice(0, 160)}`);
+  if (res.status === 400 && force) return chat(ctx, cfg, model, messages, tools, think, meta); // endpoint without named tool_choice
+  if (res.status !== 200) { log(false, undefined); throw new Error(`Nemotron HTTP ${res.status}: ${text.slice(0, 160)}`); }
   const j = JSON.parse(text) as Json;
+  log(true, j.usage as Json | undefined);
   const m = ((j.choices as Json[] | undefined)?.[0]?.message ?? {}) as Json;
   let content = str(m.content);
   let reasoning = str(m.reasoning_content) || str(m.reasoning);
@@ -1485,13 +2087,14 @@ const PREAMBLE = (inv: { id: bigint; trigger: string }, assetIds: string, roomId
   `Every piece of evidence must cite its source table and row id. Stay inside your role. Use at most ${budget} tool calls. Prefer calling several tools at once.`;
 
 const ROLE_PROMPTS: Record<string, string> = {
-  plan: 'ROLE: PLANNER. Call get_investigation and get_building_summary, then create_subtasks with 4-6 subtasks: agent_type (signal, historian, lease, simulation, critic), a one-sentence goal, and depends_on. Simulation depends on the evidence subtasks.',
+  plan: 'ROLE: PLANNER. Call get_investigation and get_building_summary, then create_subtasks with 4-6 subtasks: agent_type (signal, historian, lease, structural, simulation, critic), a one-sentence goal, and depends_on. For an equipment risk, simulation depends on the evidence subtasks. For a proposed wall change, the structural engineer leads and there is no simulation subtask.',
+  structural: 'ROLE: STRUCTURAL ENGINEER. Check the load path and condition of the walls involved (get_structure), recorded damage (get_inspection_issues) and how fast cracks are growing (assess_crack_growth). For a proposed wall change, run assess_wall_removal and check_wall_services and say plainly whether it is load-bearing, what beam/shoring it needs, what runs inside, the cost and the time. Post 2-4 pieces of evidence (source_table wall or issue), then complete_subtask.',
   signal: 'ROLE: SIGNAL ANALYST. Check sensor history for the chillers. Use detect_anomaly to find unusual readings, forecast_threshold for hours until the limit, and check_sensor_health to rule out a faulty sensor. Post 2-4 pieces of evidence with post_evidence, then complete_subtask.',
   historian: 'ROLE: MAINTENANCE HISTORIAN. Check the suspicious asset\'s age against expected life, its open and recent work orders, get_inspection_issues for physical damage it has already caused, and search_past_incidents for similar failures. Flag tickets that were ignored or repeated. Post 2-4 pieces of evidence, then complete_subtask.',
   lease: 'ROLE: TENANT AND LEASE ANALYST. Use get_dependents to find every room the suspicious chiller serves, then get_tenants and get_lease_terms. Report who is affected, their cost of downtime per hour, uptime clauses and penalties. Post 2-4 pieces of evidence, then complete_subtask.',
   hypothesize: 'ROLE: PLANNER. Read get_evidence_chain, then call post_hypothesis for up to 3 root causes (one may be "SENSOR" for a faulty sensor). Each names an asset, the failure mechanism in one sentence, and the evidence ids that support or contradict it.',
   simulate: 'ROLE: SIMULATION ENGINEER. Run simulate_cascade with no actions (the do-nothing baseline) and run_risk_estimate with no actions. Post the outage time, downtime and impact as evidence (source_table scenario, source_row do_nothing), then complete_subtask.',
-  propose: 'ROLE: PLANNER. Read get_evidence_chain, then call post_action_candidate for 3-4 actions that address the top hypothesis. Kinds: work_order (planned repair), load_shift, tenant_notice, portable_cooling.',
+  propose: 'ROLE: PLANNER. Read get_evidence_chain, then call post_action_candidate for 3-5 actions. For an equipment risk: work_order (planned repair), load_shift, tenant_notice, portable_cooling, structural_repair (stop vibration damage to walls). For a proposed wall change: engineer_review, temporary_shoring and install_beam (load-bearing), remove_partition (partitions), reroute_services, dust_containment; only the steps the assessment says apply.',
   compare: 'ROLE: SIMULATION ENGINEER. Call compare_scenarios to test every proposed action against doing nothing. If a repair takes a chiller offline, also simulate_cascade with the recommended plan to check the server room stays under its limit.',
   critique: 'ROLE: CRITIC. Find what the team got wrong before a person acts on it. Call get_evidence_chain, then check: 1) every hypothesis has 2+ independent sources; 2) contradicting evidence was not ignored; 3) no action rests on an unchecked assumption, for example whether Chiller 1 has enough spare capacity during a repair; 4) every action was verified by simulation; 5) impact numbers come from tool results. Then post_critique: "approve", or "revise" with at most 3 specific requests, each naming an agent_type. Be strict but fair.',
   decide: 'ROLE: PLANNER. The Critic approved. Call get_evidence_chain, then write_decision with the root cause, the evidence chain in order, the recommended actions in ranked order with costs, and what would change your mind.',
@@ -1499,17 +2102,43 @@ const ROLE_PROMPTS: Record<string, string> = {
 };
 
 const PHASE_AGENT: Record<string, string> = {
-  plan: 'planner', signal: 'signal', historian: 'historian', lease: 'lease', hypothesize: 'planner', simulate: 'simulation',
+  plan: 'planner', signal: 'signal', historian: 'historian', lease: 'lease', structural: 'structural', hypothesize: 'planner', simulate: 'simulation',
   propose: 'planner', compare: 'simulation', critique: 'critic', decide: 'planner', narrate: 'narrator',
 };
-const THINKERS = new Set(['plan', 'hypothesize', 'critique', 'decide']);
+const THINKERS = new Set(['hypothesize', 'critique']); // reasoning mode only where judgment matters
+const LARGE_PHASES = new Set(['plan', 'hypothesize', 'critique', 'decide', 'propose']);
+
+/** The database pre-runs the read tools a specialist always needs, logs them as that agent's steps, and hands
+ *  the results over in the prompt: one model turn instead of three. */
+function brief(tx: Ctx, invId: bigint, role: string, kind: string, subject: string, model: string): string {
+  const top = [...tx.db.asset.iter()].filter(a => a.kind === 'chiller').sort((a, b) => anomalyScore(tx, b.id).z - anomalyScore(tx, a.id).z)[0]?.id ?? 'CH-2';
+  const plan: [string, Json][] =
+    role === 'signal' ? [['detect_anomaly', {}], ['forecast_threshold', { asset_id: top }], ['check_sensor_health', { asset_id: top }]]
+    : role === 'historian' ? [['get_asset', { asset_id: top }], ['get_work_orders', { asset_id: top }], ['get_inspection_issues', kind === 'structural_change' ? {} : { asset_id: top }], ['get_field_notes', {}]]
+    : role === 'lease' ? (kind === 'structural_change' ? [['get_tenants', {}]] : [['get_dependents', { asset_id: top }], ['get_tenants', {}]])
+    : role === 'structural' ? (kind === 'structural_change'
+        ? [['get_structure', { wall_id: subject }], ['assess_wall_removal', { wall_id: subject }], ['check_code', { wall_id: subject }], ['check_wall_services', { wall_id: subject }]]
+        : [['get_structure', { room_id: tx.db.asset.id.find(top)?.roomId ?? 'MECH' }], ['assess_crack_growth', {}], ['get_load_path', { element_id: 'RT-1' }]])
+    : [];
+  const out: string[] = [];
+  for (const [name, args] of plan) {
+    try {
+      const r = execTool(tx, invId, role, { id: name, name, args });
+      logStep(tx, invId, role, name, `Pre-fetched: ${name.replace(/_/g, ' ')}`, r.line, toolTarget(args), 'done', model);
+      tx.db.toolCall.insert({ id: 0n, invId, agent: role, tool: name, ok: true, error: 'prefetch', model, ms: 0 });
+      out.push(`${name}(${JSON.stringify(args)}) → ${JSON.stringify(r.out).slice(0, 1200)}`);
+    } catch (e) { out.push(`${name} failed: ${String(e).slice(0, 120)}`); }
+  }
+  return out.join('\n');
+}
 
 /** One agent's tool-calling loop. Returns true if the phase's goal was met. */
 function runAgent(ctx: PCtx, cfg: AiCfg, invId: bigint, phase: string, note: string): boolean {
-  const agent = PHASE_AGENT[phase.split(':')[0]] ?? 'planner';
   const base = phase.split(':')[0];
+  // revisions go to the specialist the Critic named, not the planner
+  const agent = base === 'revise' ? (note.split('|')[0] || 'planner') : PHASE_AGENT[base] ?? 'planner';
   const think = THINKERS.has(base);
-  const model = think ? cfg.large : cfg.small;
+  const model = LARGE_PHASES.has(base) ? cfg.large : cfg.small;
   const toolNames = base === 'revise' ? (AGENT_TOOLS[note.split('|')[0]] ?? AGENT_TOOLS.signal) : AGENT_TOOLS[base];
   const tools = toolNames.map(n => TOOLS[n]);
   const setup = ctx.withTx(tx => {
@@ -1520,7 +2149,8 @@ function runAgent(ctx: PCtx, cfg: AiCfg, invId: bigint, phase: string, note: str
     const sub = [...tx.db.subtask.iter()].find(s => s.invId === invId && s.agent === agent && s.status !== 'done');
     if (sub && (sub.status === 'ready' || sub.status === 'reopened')) tx.db.subtask.id.update({ ...sub, status: 'claimed' });
     const done = [...tx.db.subtask.iter()].filter(s => s.invId === invId && s.status === 'done').map(s => `${s.agent}: ${s.goal}`).join('\n');
-    return { inv: { id: inv.id, trigger: inv.trigger }, assets, rooms, goal: sub?.goal ?? '', done };
+    const briefing = brief(tx, invId, base === 'revise' ? note.split('|')[0] : base, inv.kind, inv.subject, model);
+    return { inv: { id: inv.id, trigger: inv.trigger }, assets, rooms, goal: sub?.goal ?? '', done, kind: inv.kind, subject: inv.subject, briefing };
   });
   if (!setup) return false;
 
@@ -1528,14 +2158,15 @@ function runAgent(ctx: PCtx, cfg: AiCfg, invId: bigint, phase: string, note: str
     ? `${ROLE_PROMPTS[note.split('|')[0] === 'simulation' ? 'compare' : note.split('|')[0]] ?? ''}\nTHE CRITIC SENT WORK BACK: ${note.split('|')[1] ?? ''}\nAnswer exactly that request with tools, post evidence, then complete_subtask.`
     : ROLE_PROMPTS[base];
   const system = `${thinkPrefix(model, think)}\n${PREAMBLE(setup.inv, setup.assets, setup.rooms, 8)}\n\n${rolePrompt}`;
-  const user = `YOUR SUBTASK: ${setup.goal || setup.inv.trigger}\nCONTEXT FROM FINISHED SUBTASKS:\n${setup.done || '(none yet)'}\nStart now by calling tools.`;
+  const user = `${setup.kind === 'structural_change' ? `INVESTIGATION TYPE: proposed structural change, remove wall ${setup.subject}.\n` : 'INVESTIGATION TYPE: operational risk.\n'}YOUR SUBTASK: ${setup.goal || setup.inv.trigger}\nCONTEXT FROM FINISHED SUBTASKS:\n${setup.done || '(none yet)'}\n${setup.briefing ? `BRIEFING (already read from the database for you; cite it, do not re-fetch):\n${setup.briefing}\nPost your evidence and complete_subtask now, in as few turns as possible; call more tools only if something is missing.` : 'Start now by calling tools.'}`;
   const messages: Json[] = [{ role: 'system', content: system }, { role: 'user', content: user }];
 
   let calls = 0, nudged = false;
+  const seen = new Set<string>();
   for (let round = 0; round < 5 && calls < 10; round++) {
     const thinking = ctx.withTx(tx => logStep(tx, invId, agent, 'thinking', think ? 'Reasoning…' : 'Choosing tools…', '', '', 'thinking', model));
     let out: ChatOut;
-    try { out = chat(ctx, cfg, model, messages, tools, think); }
+    try { out = chat(ctx, cfg, model, messages, tools, think, { invId, agent }); }
     catch (e) {
       ctx.withTx(tx => { const r = tx.db.agentStep.id.find(thinking.id); if (r) tx.db.agentStep.id.update({ ...r, tool: 'nemotron', why: 'Model call failed; falling back', result: String(e).slice(0, 200), status: 'error' }); });
       return false;
@@ -1558,18 +2189,25 @@ function runAgent(ctx: PCtx, cfg: AiCfg, invId: bigint, phase: string, note: str
     for (const c of out.calls) {
       calls++;
       let result: unknown;
-      if (!toolNames.includes(c.name)) result = { error: `tool ${c.name} is not available to you` };
+      const sig = c.name + JSON.stringify({ ...c.args, why: undefined });
+      const repeat = seen.has(sig);
+      seen.add(sig);
+      if (repeat && !['post_evidence', 'post_hypothesis', 'post_action_candidate', 'post_answer'].includes(c.name))
+        result = { note: 'You already called this with the same arguments; use that result. Next: post your findings with post_evidence, then complete_subtask.' };
+      else if (!toolNames.includes(c.name)) result = { error: `tool ${c.name} is not available to you` };
       else {
         try {
           result = ctx.withTx(tx => {
             const r = execTool(tx, invId, agent, c);
             const status = c.name === 'post_critique' && str(r.line).startsWith('REVISE') ? 'revise' : 'done';
             logStep(tx, invId, agent, c.name, str(c.args.why) || c.name.replace(/_/g, ' '), r.line, toolTarget(c.args), status, model);
+            tx.db.toolCall.insert({ id: 0n, invId, agent, tool: c.name, ok: true, error: '', model, ms: 0 });
             return r.out;
           });
         } catch (e) {
           const msg = String(e instanceof Error ? e.message : e);
-          ctx.withTx(tx => logStep(tx, invId, agent, c.name, str(c.args.why) || c.name, `rejected: ${msg}`, toolTarget(c.args), 'error', model));
+          ctx.withTx(tx => { logStep(tx, invId, agent, c.name, str(c.args.why) || c.name, `rejected: ${msg}`, toolTarget(c.args), 'error', model);
+            tx.db.toolCall.insert({ id: 0n, invId, agent, tool: c.name, ok: false, error: msg.slice(0, 200), model, ms: 0 }); });
           result = { error: msg };
         }
       }
@@ -1580,13 +2218,18 @@ function runAgent(ctx: PCtx, cfg: AiCfg, invId: bigint, phase: string, note: str
   return goalMet(ctx, invId, base, note);
 }
 
+/** Specialists that work in parallel after the plan. */
+function parallelGroup(kind: string): string[] {
+  return kind === 'structural_change' ? ['structural', 'historian', 'lease'] : ['signal', 'historian', 'lease', 'structural'];
+}
+
 function goalMet(ctx: PCtx, invId: bigint, base: string, note: string): boolean {
   return ctx.withTx(tx => {
     const db = tx.db;
     const mine = <T extends { invId: bigint }>(it: Iterable<T>) => [...it].filter(x => x.invId === invId);
     switch (base) {
       case 'plan': return mine(db.subtask.iter()).length > 0;
-      case 'signal': case 'historian': case 'lease': return mine(db.evidence.iter()).some(e => e.agent === base);
+      case 'signal': case 'historian': case 'lease': case 'structural': return mine(db.evidence.iter()).some(e => e.agent === base);
       case 'hypothesize': return mine(db.hypothesis.iter()).length > 0;
       case 'simulate': return [...db.scenario.iter()].some(s => s.label === 'do_nothing' && s.riskJson.length > 4);
       case 'propose': return mine(db.actionCandidate.iter()).length > 0;
@@ -1602,20 +2245,27 @@ function goalMet(ctx: PCtx, invId: bigint, base: string, note: string): boolean 
 
 // Scripted ops (indexes into OPS) used when a phase can't be done by Nemotron.
 const FALLBACK: Record<string, number[]> = {
-  plan: [0, 1, 2], signal: [3, 5, 11], historian: [6, 7, 8], lease: [9, 10], hypothesize: [4], simulate: [12, 13],
+  plan: [0, 1, 2], signal: [3, 5, 11], historian: [6, 7, 8], lease: [9, 10], structural: [21, 22], hypothesize: [4], simulate: [12, 13],
   propose: [14], compare: [15], critique: [18], decide: [19], narrate: [20], revise: [17],
 };
 
+// Wall-change fallbacks (WALL_OPS indexes + 100).
+const FALLBACK_WALL: Record<string, number[]> = {
+  plan: [100, 101], structural: [102, 105, 107], historian: [103], lease: [104], propose: [109], critique: [108], decide: [110], narrate: [111], revise: [107],
+};
+
 function runFallback(ctx: PCtx, invId: bigint, base: string) {
-  for (const i of FALLBACK[base] ?? []) {
-    const op = OPS[i];
+  const kind = ctx.withTx(tx => tx.db.investigation.id.find(invId)?.kind ?? 'cascade');
+  for (const i of (kind === 'structural_change' ? FALLBACK_WALL : FALLBACK)[base] ?? []) {
+    const op = i >= 100 ? WALL_OPS[i - 100] : i >= 21 ? STRUCT_OPS[i - 21] : OPS[i];
     const step = ctx.withTx(tx => logStep(tx, invId, op.agent, op.tool, op.why, '', op.target ?? '', 'running', ''));
     try { ctx.sleep(TimeDuration.fromMillis(700)); } catch { /* no pacing */ }
     ctx.withTx(tx => {
       const inv = tx.db.investigation.id.find(invId);
       if (!inv) return;
       let out: { result: string; status?: string };
-      try { out = runOp(tx, inv, op, i); } catch (e) { out = { result: `skipped: ${String(e).slice(0, 120)}`, status: 'error' }; }
+      try { out = i >= 100 ? runWallOp(tx, invId, i - 100) : i >= 21 ? runStructOp(tx, invId, i - 21) : runOp(tx, inv, op, i); }
+      catch (e) { out = { result: `skipped: ${String(e).slice(0, 120)}`, status: 'error' }; }
       const r = tx.db.agentStep.id.find(step.id);
       if (r) tx.db.agentStep.id.update({ ...r, result: out.result, status: out.status === 'revise' ? 'done' : out.status ?? 'done' });
     });
@@ -1632,19 +2282,21 @@ function advance(tx: Ctx, invId: bigint, phase: string) {
   const next = (p: string, note = '') => { scheduleJob(tx, invId, p, note, 100_000n); row = { ...row, phase: p }; };
   const base = phase.split(':')[0];
 
-  if (base === 'plan') { next('signal'); next('historian'); next('lease'); row.phase = 'evidence'; }
-  else if (['signal', 'historian', 'lease'].includes(base)) {
-    if (['signal', 'historian', 'lease'].every(p => done.has(p)) && !done.has('hypothesize-scheduled')) { done.add('hypothesize-scheduled'); row.phasesDone = [...done].join(','); next('hypothesize'); }
+  const group = parallelGroup(inv.kind);
+  const wallChange = inv.kind === 'structural_change';
+  if (base === 'plan') { for (const g of group) next(g); row.phase = 'evidence'; }
+  else if (group.includes(base)) {
+    if (group.every(p => done.has(p)) && !done.has('group-done')) { done.add('group-done'); row.phasesDone = [...done].join(','); next(wallChange ? 'propose' : 'hypothesize'); }
   }
   else if (base === 'hypothesize') next('simulate');
   else if (base === 'simulate') next('propose');
-  else if (base === 'propose') next('compare');
+  else if (base === 'propose') next(wallChange ? 'critique' : 'compare');
   else if (base === 'compare') next('critique');
   else if (base === 'critique') {
     const rounds = inv.critiqueRounds + 1;
     row.critiqueRounds = rounds;
     const last = [...tx.db.critique.iter()].filter(c => c.invId === invId).sort((x, y) => (x.id < y.id ? 1 : -1))[0];
-    if (last?.verdict === 'revise' && rounds <= 2 && inv.pending) {
+    if (last?.verdict === 'revise' && rounds <= 1 && inv.pending) {
       for (const agent of inv.pending.split(',')) next(`revise:${agent}`, `${agent}|${last.text}`);
       row.phase = 'revise';
     } else next('decide');
@@ -1657,6 +2309,11 @@ function advance(tx: Ctx, invId: bigint, phase: string) {
   else if (base === 'decide') next('narrate');
   else if (base === 'narrate') {
     row.phase = 'done'; row.status = 'awaiting_approval';
+    if (inv.mode === 'nemotron') {
+      const secs = Number(tx.timestamp.microsSinceUnixEpoch - inv.createdAt.microsSinceUnixEpoch) / 1e6;
+      const calls = [...tx.db.llmCall.iter()].filter(l => l.invId === invId).length;
+      setMetric(tx, `agents.ttd.${inv.kind}`, `Nemotron team: question → decision (${inv.kind === 'structural_change' ? 'wall change' : 'risk investigation'})`, secs, 's', `${calls} model calls · 8 agents · last run`, 'agents');
+    }
     if (![...tx.db.sceneCommand.iter()].some(c => c.payload.includes('guide_trail'))) emit(tx, { kind: 'guide_trail', target: 'CH-2', forRole: 'technician' });
   }
   tx.db.investigation.id.update(row);
@@ -1671,32 +2328,489 @@ export const agentWorker = spacetimedb.procedure({ onSchedule: agentJob }, { job
   const base = job.phase.split(':')[0];
   let ok = false;
   if (state) {
-    ok = runAgent(ctx, state, job.invId, job.phase, job.note);
-    // spec: on bad output, the error goes back to the model once, then the cached path is used
-    if (!ok && base !== 'revise') ok = runAgent(ctx, state, job.invId, job.phase, job.note);
+    ok = runPhaseV2(ctx, state, job.invId, job.phase, job.note);
+    // spec: on a failed call the phase gets one more try, then the deterministic path is used
+    if (!ok && !['revise', 'simulate', 'compare'].includes(base)) ok = runPhaseV2(ctx, state, job.invId, job.phase, job.note);
   }
   if (!ok) runFallback(ctx, job.invId, base);
   // the critique fallback approves; the critic must always leave a verdict
   ctx.withTx(tx => {
     if (base === 'narrate' && [...tx.db.answer.iter()].filter(a => a.invId === job.invId).length < 2) {
       const inv = tx.db.investigation.id.find(job.invId);
-      if (inv) runOp(tx, inv, OPS[20], 20);
+      if (inv) { if (inv.kind === 'structural_change') runWallOp(tx, inv.id, 11); else runOp(tx, inv, OPS[20], 20); }
     }
-    if (['signal', 'historian', 'lease'].includes(base)) subtaskDone(tx, job.invId, base);
+    if (['signal', 'historian', 'lease', 'structural'].includes(base)) subtaskDone(tx, job.invId, base);
+    // wall changes: the narrator's fallback marks the wall; make sure the state is final
+    const inv2 = tx.db.investigation.id.find(job.invId);
+    if (base === 'decide' && inv2?.kind === 'structural_change') {
+      const w = tx.db.wall.id.find(inv2.subject);
+      if (w && w.proposalState === 'evaluating') tx.db.wall.id.update({ ...w, proposalState: removalOk(assessRemoval(tx, w.id).verdict) ? 'recommended' : 'not_recommended' });
+    }
     advance(tx, job.invId, job.phase);
+    if (base === 'narrate') gradeInvestigation(tx, job.invId);
   });
   return {};
 });
 
+// ================================================================ reasoning pipeline v2
+// The model reasons; the database gathers, computes and verifies.
+//   plan        Planner (large)          1 structured call
+//   gather      4 specialists (small)    tools pre-run by the DB; 1 structured call each → findings,
+//                                        every number must appear in the data they were given
+//   hypothesize Planner (large, think)   1 call; must cite evidence ids; duplicates merged
+//   simulate    Sim Engineer             deterministic: the simulation engine is the tool
+//   propose     Planner (large)          1 call; only actions the engine says apply
+//   compare     Sim Engineer             deterministic re-simulation + ranking
+//   critique    Critic (large, think)    1 call over a DB-computed audit; send-backs run as
+//                                        deterministic checks, then 1 re-critique
+//   decide      Planner (large)          1 structured decision, checked against evidence + engine
+//   narrate     Narrator (large)         1 call from a fact sheet → claim verifier (numbers,
+//                                        names, polarity) → 1 retry → verified template
+// ~10 model calls per investigation instead of ~50, and every spoken number is traceable.
+
+const SOURCE_TABLES = ['asset', 'room', 'work_order', 'tenant', 'past_incident', 'sensor_reading', 'scenario', 'dependency', 'issue', 'wall', 'field_note'];
+
+const POST_FINDINGS: ToolDef = { name: 'post_findings', description: 'Post 2-4 findings from the briefing and a one-sentence summary.', params: { ...W,
+  findings: { type: 'array', items: { type: 'object', properties: {
+    fact: { type: 'string', description: 'One sentence; every number must come from the briefing' },
+    source_table: { type: 'string', enum: SOURCE_TABLES }, source_row: { type: 'string' },
+    confidence: { type: 'number' }, about_asset: { type: 'string', description: 'asset or wall id the finding is about' },
+    supports: { type: 'boolean', description: 'true if it points to a real problem' } },
+    required: ['fact', 'source_table', 'source_row', 'confidence', 'about_asset', 'supports'] } },
+  summary: { type: 'string' } }, required: ['why', 'findings', 'summary'] };
+
+const POST_HYPOTHESES: ToolDef = { name: 'post_hypotheses', description: 'Up to 3 distinct root causes, each citing evidence ids.', params: { ...W,
+  hypotheses: { type: 'array', items: { type: 'object', properties: {
+    asset_id: { type: 'string', description: 'asset id, or SENSOR for a faulty sensor' }, mechanism: { type: 'string' },
+    supporting_evidence_ids: { type: 'array', items: { type: 'integer' } }, contradicting_evidence_ids: { type: 'array', items: { type: 'integer' } } },
+    required: ['asset_id', 'mechanism', 'supporting_evidence_ids'] } } }, required: ['why', 'hypotheses'] };
+
+const POST_ACTIONS = (kinds: string[]): ToolDef => ({ name: 'post_actions', description: 'Propose the actions that address the problem, most important first.', params: { ...W,
+  actions: { type: 'array', items: { type: 'object', properties: { kind: { type: 'string', enum: kinds }, rationale: { type: 'string' } }, required: ['kind', 'rationale'] } } },
+  required: ['why', 'actions'] });
+
+const WRITE_DECISION_V2: ToolDef = { name: 'write_decision', description: 'The final decision.', params: { ...W,
+  root_cause_hypothesis_id: { type: 'integer' }, ranked_actions: { type: 'array', items: { type: 'string' } },
+  confidence: { type: 'number', description: '0..1' }, summary: { type: 'string', description: '2-3 sentences, numbers only from the evidence' },
+  what_would_change_my_mind: { type: 'string' } }, required: ['why', 'summary'] };
+
+const POST_ANSWERS: ToolDef = { name: 'post_answers', description: 'Spoken answers, at most 3 short sentences each, plain English, no markdown.', params: { ...W,
+  technician: { type: 'string', description: 'what is wrong, where to go, what to check first' },
+  manager: { type: 'string', description: 'the risk, the cost if ignored, the recommended action and its cost; ask to approve' } },
+  required: ['why', 'technician', 'manager'] };
+
+// ---- verification helpers
+
+function numbersIn(text: string): number[] {
+  const out: number[] = [];
+  for (const m of text.replace(/[A-Z]{1,4}-\d+[A-Z]?/g, ' ').matchAll(/(\d[\d,]*\.?\d*)\s*([kK]\b|%)?/g)) {
+    const v = parseFloat(m[1].replace(/,/g, ''));
+    if (isFinite(v)) out.push(m[2] === 'k' || m[2] === 'K' ? v * 1000 : v);
+  }
+  return out;
+}
+
+/** A number in prose is grounded if it matches a number in the facts (rounding, k, % and per-hour forms allowed). */
+function groundedNumber(n: number, facts: number[]): boolean {
+  if (Number.isInteger(n) && n <= 12) return true; // small counts: "2 tickets", "3 sentences"
+  return facts.some(a => {
+    const tol = Math.max(0.051, Math.abs(a) * 0.02);
+    return Math.abs(a - n) <= tol || Math.abs(a * 100 - n) <= 0.6 || Math.abs(a / 1000 - n) <= Math.max(0.051, Math.abs(a / 1000) * 0.02) || Math.abs(Math.round(a) - n) < 0.5;
+  });
+}
+
+function unverified(text: string, facts: number[]): number[] { return numbersIn(text).filter(n => !groundedNumber(n, facts)); }
+
+/** Everything the Narrator may say, with ids. */
+function factSheet(tx: Ctx, invId: bigint): string {
+  const db = tx.db, inv = db.investigation.id.find(invId)!;
+  const lines: string[] = [];
+  const dec = [...db.decision.iter()].find(d => d.invId === invId);
+  if (dec) lines.push(`DECISION: ${dec.rootCause} (likelihood ${Math.round(dec.likelihood * 100)}%). ${dec.summary}`);
+  for (const h of [...db.hypothesis.iter()].filter(h => h.invId === invId)) lines.push(`HYPOTHESIS ${h.id} [${h.assetId}] ${Math.round(h.likelihood * 100)}%: ${h.text}`);
+  for (const e of [...db.evidence.iter()].filter(e => e.invId === invId)) lines.push(`EVIDENCE ${e.id} (${e.agent}, ${e.sourceTable}/${e.sourceRow}): ${e.fact}`);
+  for (const s of [...db.scenario.iter()]) lines.push(`SCENARIO ${s.label}: outage chance ${Math.round(s.outageChance * 100)}%, first outage ${s.outageHour >= 0 ? clock(s.outageHour) : 'none'}, ${s.downtimeHours.toFixed(1)} h down, impact ${money(s.impact)} (${Math.round(s.impact)})`);
+  for (const a of [...db.actionCandidate.iter()].filter(a => a.invId === invId)) lines.push(`ACTION ${a.kind}${a.recommended ? ' (recommended)' : ''}: ${a.title}, cost ${money(a.cost)} (${a.cost})${a.saved ? `, saves ${money(a.saved)}` : ''}`);
+  if (inv.kind === 'structural_change') {
+    const w = db.wall.id.find(inv.subject)!, r = assessRemoval(tx, w.id);
+    lines.push(`WALL ${w.id} ${w.name}: ${w.kind === 'partition' ? 'NON-load-bearing partition' : 'LOAD-BEARING'}, ${w.loadKnm.toFixed(1)} kN/m of ${w.capacityKnm.toFixed(1)} kN/m (${Math.round(w.utilization * 100)}%), inside: ${w.services || 'nothing'}`);
+    lines.push(`VERDICT ${r.verdict}${r.beam ? `, beam ${r.beam}` : ''}, total ${money(r.cost)} (${r.cost}), ${r.days} days. ${r.reasons.join(' ')}`);
+    lines.push(`ROOMS BESIDE: ${roomsBeside(tx, w).map(x => `${x.name}${x.tenantId ? ` (tenant ${db.tenant.id.find(x.tenantId)?.name})` : ''}`).join(', ')}`);
+  } else {
+    const f = forecastThreshold(tx, 'CH-2');
+    lines.push(`FORECAST CH-2 crosses ${VIB_LIMIT} mm/s at ${clock(f.hours)} (+${f.hours.toFixed(1)} h)`);
+    for (const t2 of db.tenant.iter()) lines.push(`TENANT ${t2.name}: $${t2.costPerHour}/h downtime, ${t2.allowedDowntimeHours} h allowed, penalty ${money(t2.penalty)} (${t2.penalty})`);
+  }
+  return lines.join('\n');
+}
+
+/** Problems with an answer: unverified numbers, wrong tenants, structural polarity flips. */
+function verifyAnswer(tx: Ctx, invId: bigint, text: string, facts: string): string[] {
+  const issues: string[] = [];
+  const bad = unverified(text, numbersIn(facts));
+  if (bad.length) issues.push(`numbers not in the facts: ${bad.join(', ')}`);
+  for (const t2 of tx.db.tenant.iter()) if (text.includes(t2.name) && !facts.includes(t2.name)) issues.push(`${t2.name} is not involved`);
+  for (const t2 of tx.db.tenant.iter()) if (new RegExp(`\\b${t2.id}\\b`).test(text)) issues.push(`use the tenant's name, not the id ${t2.id}`);
+  const inv = tx.db.investigation.id.find(invId)!;
+  if (inv.kind === 'structural_change') {
+    const w = tx.db.wall.id.find(inv.subject)!;
+    const saysNot = /\b(not|non)[- ]?(load[- ]?bearing|structural)/i.test(text);
+    const saysBearing = /load[- ]?bearing/i.test(text) && !saysNot;
+    if (w.kind !== 'partition' && saysNot) issues.push('the wall IS load-bearing');
+    if (w.kind === 'partition' && saysBearing) issues.push('the wall is NOT load-bearing');
+  }
+  return issues;
+}
+
+/** What the Critic should look at, computed from the blackboard. */
+function audit(tx: Ctx, invId: bigint): string {
+  const db = tx.db, inv = db.investigation.id.find(invId)!;
+  const ev = [...db.evidence.iter()].filter(e => e.invId === invId);
+  const links = [...db.hypothesisEvidence.iter()].filter(l => l.invId === invId);
+  const out: string[] = [];
+  for (const h of [...db.hypothesis.iter()].filter(h => h.invId === invId)) {
+    const sup = ev.filter(e => (e.hypothesisId === h.id && e.supports) || links.some(l => l.hypothesisId === h.id && l.evidenceId === e.id && l.supports));
+    const con = ev.filter(e => (e.hypothesisId === h.id && !e.supports) || links.some(l => l.hypothesisId === h.id && l.evidenceId === e.id && !l.supports));
+    const sources = new Set(sup.map(e => e.sourceTable)).size;
+    out.push(`H${h.id} ${h.assetId} ${Math.round(h.likelihood * 100)}%: ${sup.length} supporting from ${sources} independent source types, ${con.length} contradicting${sources < 2 ? '  ← fewer than 2 independent sources' : ''}`);
+  }
+  const acts = [...db.actionCandidate.iter()].filter(a => a.invId === invId);
+  const simulated = [...db.scenario.iter()].some(s => s.label === 'with_plan');
+  if (inv.kind !== 'structural_change') out.push(`ACTIONS: ${acts.map(a => `${a.kind}${a.rank ? ` #${a.rank}` : ''}`).join(', ')}; ${simulated ? 'simulated against doing nothing' : 'NOT simulated yet'}`);
+  const assumptions: string[] = [];
+  const has = (re: RegExp) => ev.some(e => re.test(e.fact));
+  if (inv.kind !== 'structural_change') {
+    if (acts.some(a => a.kind === 'work_order' || a.kind === 'load_shift') && !has(/Chiller 1 has [\d.]+ tons spare/i)) assumptions.push('the plan takes Chiller 2 offline; nobody has verified Chiller 1 can carry the server room meanwhile (simulation)');
+    if (!has(/sensor (looks|is) healthy|smooth trend|sibling/i)) assumptions.push('a faulty vibration sensor has not been ruled out (signal)');
+  } else {
+    const w = db.wall.id.find(inv.subject)!;
+    if (w.services && !has(/inside the wall/i)) assumptions.push(`nobody has checked what runs inside ${w.id} (structural)`);
+    if (w.kind !== 'partition' && !has(/shor/i)) assumptions.push('who carries the load while the wall is out has not been addressed (structural)');
+  }
+  out.push(assumptions.length ? `UNVERIFIED ASSUMPTIONS:\n- ${assumptions.join('\n- ')}` : 'UNVERIFIED ASSUMPTIONS: none');
+  return out.join('\n');
+}
+
+// ---- structured single call
+
+function structured(ctx: PCtx, cfg: AiCfg, invId: bigint, agent: string, large: boolean, think: boolean, system: string, user: string, tool: ToolDef): Json | null {
+  const model = large ? cfg.large : cfg.small;
+  const thinking = ctx.withTx(tx => logStep(tx, invId, agent, 'thinking', think ? 'Reasoning…' : 'Working…', '', '', 'thinking', model));
+  let out: ChatOut;
+  try {
+    out = chat(ctx, cfg, model, [{ role: 'system', content: `${thinkPrefix(model, think)}\n${system}` }, { role: 'user', content: user }], [tool], think, { invId, agent }, tool.name);
+  } catch (e) {
+    ctx.withTx(tx => { const r = tx.db.agentStep.id.find(thinking.id); if (r) tx.db.agentStep.id.update({ ...r, tool: 'nemotron', why: 'Model call failed; falling back', result: String(e).slice(0, 200), status: 'error' }); });
+    return null;
+  }
+  ctx.withTx(tx => {
+    const r = tx.db.agentStep.id.find(thinking.id);
+    if (!r) return;
+    const why = (out.reasoning || '').replace(/\s+/g, ' ').trim();
+    if (why) tx.db.agentStep.id.update({ ...r, tool: 'reasoning', why: why.slice(0, 120), result: why.slice(120, 340), status: 'done' });
+    else tx.db.agentStep.id.delete(r.id);
+  });
+  const call = out.calls.find(c => c.name === tool.name) ?? out.calls[0];
+  if (call) return call.args;
+  try { const m = out.content.match(/\{[\s\S]*\}/); if (m) return JSON.parse(m[0]) as Json; } catch { /* ignore */ }
+  return null;
+}
+
+function ctxLine(tx: Ctx, invId: bigint) {
+  const inv = tx.db.investigation.id.find(invId)!;
+  return { inv, header: `${PREAMBLE({ id: inv.id, trigger: inv.trigger }, [...tx.db.asset.iter()].map(x => x.id).join(', '), [...tx.db.room.iter()].map(x => x.id).join(', '), 4)}\n${inv.kind === 'structural_change' ? `INVESTIGATION TYPE: proposed structural change, remove wall ${inv.subject}.` : 'INVESTIGATION TYPE: operational risk.'}` };
+}
+
+const logTool = (tx: Ctx, invId: bigint, agent: string, tool: string, why: string, line: string, target: string, model: string, ok = true, err = '') => {
+  logStep(tx, invId, agent, tool, why, ok ? line : `rejected: ${err}`, target, ok ? 'done' : 'error', model);
+  tx.db.toolCall.insert({ id: 0n, invId, agent, tool, ok, error: err.slice(0, 200), model, ms: 0 });
+};
+
+// ---- phases
+
+function v2Plan(ctx: PCtx, cfg: AiCfg, invId: bigint): boolean {
+  const pre = ctx.withTx(tx => {
+    const { inv, header } = ctxLine(tx, invId);
+    const s = execTool(tx, invId, 'planner', { id: 'b', name: 'get_building_summary', args: {} });
+    logTool(tx, invId, 'planner', 'get_building_summary', 'Learning the floor, assets and tenants', s.line, '', cfg.large);
+    return { header, kind: inv.kind, trigger: inv.trigger, summary: JSON.stringify(s.out).slice(0, 2500) };
+  });
+  const args = structured(ctx, cfg, invId, 'planner', true, false,
+    `${pre.header}\n\n${ROLE_PROMPTS.plan}`,
+    `QUESTION: "${pre.trigger}"\nBUILDING: ${pre.summary}\nCall create_subtasks now.`, TOOLS.create_subtasks);
+  if (!args) return false;
+  return ctx.withTx(tx => {
+    try { const r = execTool(tx, invId, 'planner', { id: 'c', name: 'create_subtasks', args }); logTool(tx, invId, 'planner', 'create_subtasks', str(args.why) || 'Splitting the work across the team', r.line, '', cfg.large); }
+    catch (e) { logTool(tx, invId, 'planner', 'create_subtasks', 'Splitting the work', '', '', cfg.large, false, String(e)); }
+    return [...tx.db.subtask.iter()].some(s => s.invId === invId);
+  });
+}
+
+function v2Specialist(ctx: PCtx, cfg: AiCfg, invId: bigint, role: string, extra = ''): boolean {
+  const pre = ctx.withTx(tx => {
+    const { inv, header } = ctxLine(tx, invId);
+    const sub = [...tx.db.subtask.iter()].find(s => s.invId === invId && s.agent === role && s.status !== 'done');
+    if (sub && (sub.status === 'ready' || sub.status === 'reopened')) tx.db.subtask.id.update({ ...sub, status: 'claimed' });
+    const rp = role === 'structural' ? ROLE_PROMPTS.structural : ROLE_PROMPTS[role] ?? '';
+    return { header, rp, goal: sub?.goal ?? inv.trigger, briefing: brief(tx, invId, role, inv.kind, inv.subject, cfg.small) };
+  });
+  const facts = numbersIn(pre.briefing);
+  let feedback = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const args = structured(ctx, cfg, invId, role, false, false, `${pre.header}\n\n${pre.rp}`,
+      `YOUR SUBTASK: ${pre.goal}${extra ? `\nTHE CRITIC ASKED: ${extra}` : ''}\nBRIEFING (already read from the database for you):\n${pre.briefing}\n${feedback}Call post_findings with 2-4 findings. Cite source_table/source_row from the briefing. Use only numbers that appear in the briefing.`, POST_FINDINGS);
+    if (!args) return false;
+    const rejected: string[] = [];
+    const accepted = ctx.withTx(tx => {
+      let n = 0;
+      for (const fRaw of arr(args.findings).slice(0, 4)) {
+        const f = (fRaw ?? {}) as Json;
+        const fact = str(f.fact).slice(0, 240);
+        const bad = unverified(fact, facts);
+        if (bad.length) { rejected.push(`"${fact.slice(0, 60)}…" has numbers not in the briefing: ${bad.join(', ')}`); logTool(tx, invId, role, 'post_evidence', 'Posting a finding', '', '', cfg.small, false, `unverified number ${bad.join(', ')}`); continue; }
+        try {
+          postEvidence(tx, invId, role, fact, str(f.source_table), str(f.source_row), Math.max(0, Math.min(1, num(f.confidence, 0.6))), str(f.about_asset), f.supports !== false);
+          logTool(tx, invId, role, 'post_evidence', 'Posting a finding', fact, str(f.about_asset), cfg.small);
+          n++;
+        } catch (e) { const m = String(e instanceof Error ? e.message : e); rejected.push(m); logTool(tx, invId, role, 'post_evidence', 'Posting a finding', '', '', cfg.small, false, m); }
+      }
+      if (n > 0) { subtaskDone(tx, invId, role); logTool(tx, invId, role, 'complete_subtask', 'Done', str(args.summary), '', cfg.small); }
+      return n;
+    });
+    if (accepted > 0) return true;
+    feedback = `YOUR PREVIOUS FINDINGS WERE REJECTED: ${rejected.join(' | ')}\n`;
+  }
+  return false;
+}
+
+function v2Hypothesize(ctx: PCtx, cfg: AiCfg, invId: bigint): boolean {
+  const pre = ctx.withTx(tx => {
+    const { header } = ctxLine(tx, invId);
+    const ev = [...tx.db.evidence.iter()].filter(e => e.invId === invId).map(e => `E${e.id} [${e.agent}] (${e.supports ? 'problem' : 'reassuring'}, about ${e.aboutAsset}): ${e.fact}`).join('\n');
+    return { header, ev };
+  });
+  const args = structured(ctx, cfg, invId, 'planner', true, true, `${pre.header}\n\n${ROLE_PROMPTS.hypothesize}\nHypotheses must be DISTINCT root causes (different assets or SENSOR). Cite evidence by number.`,
+    `EVIDENCE ON THE BLACKBOARD:\n${pre.ev}\nCall post_hypotheses.`, POST_HYPOTHESES);
+  if (!args) return false;
+  return ctx.withTx(tx => {
+    const seenAssets = new Set<string>();
+    for (const hRaw of arr(args.hypotheses).slice(0, 3)) {
+      const h = (hRaw ?? {}) as Json;
+      const asset = str(h.asset_id);
+      if (seenAssets.has(asset)) { logTool(tx, invId, 'planner', 'post_hypothesis', 'Naming a root cause', '', asset, cfg.large, false, `duplicate of an existing ${asset} hypothesis (merged)`); continue; }
+      if (!arr(h.supporting_evidence_ids).length && asset !== 'SENSOR') { logTool(tx, invId, 'planner', 'post_hypothesis', 'Naming a root cause', '', asset, cfg.large, false, 'cites no evidence'); continue; }
+      try {
+        const r = execTool(tx, invId, 'planner', { id: 'h', name: 'post_hypothesis', args: { asset_id: asset, mechanism: h.mechanism, supporting_evidence_ids: h.supporting_evidence_ids, contradicting_evidence_ids: h.contradicting_evidence_ids } });
+        logTool(tx, invId, 'planner', 'post_hypothesis', 'Naming a root cause', r.line, asset, cfg.large);
+        seenAssets.add(asset);
+      } catch (e) { logTool(tx, invId, 'planner', 'post_hypothesis', 'Naming a root cause', '', asset, cfg.large, false, String(e instanceof Error ? e.message : e)); }
+    }
+    return seenAssets.size > 0;
+  });
+}
+
+/** Deterministic phases: the engine is the agent. */
+function v2Deterministic(ctx: PCtx, invId: bigint, phase: 'simulate' | 'compare'): boolean {
+  return ctx.withTx(tx => {
+    const inv = tx.db.investigation.id.find(invId)!;
+    if (inv.kind === 'structural_change') return true;
+    if (phase === 'simulate') {
+      claim(tx, invId, 'simulation');
+      const a = execTool(tx, invId, 'simulation', { id: 's', name: 'simulate_cascade', args: { actions: [] } });
+      logTool(tx, invId, 'simulation', 'simulate_cascade', 'What happens tonight if we do nothing?', a.line, 'SRV300', 'engine');
+      const b = execTool(tx, invId, 'simulation', { id: 'r', name: 'run_risk_estimate', args: { actions: [] } });
+      logTool(tx, invId, 'simulation', 'run_risk_estimate', 'How likely is the outage? 50 futures', b.line, 'SRV300', 'engine');
+      const o = a.out as Json, r = b.out as Json;
+      postEvidence(tx, invId, 'simulation', `Do nothing: Chiller 2 fails ${str(o.chiller2_fails_at)}; Server Room 300 down at ${str(o.server_room_down_at)}, ${num(o.downtime_hours).toFixed(1)} h down, ${money(num(o.impact_usd))}; outage in ${Math.round(num(r.outage_chance) * 100)}% of 50 runs.`,
+        'scenario', 'do_nothing', 0.85, 'CH-2', true);
+      subtaskDone(tx, invId, 'simulation');
+      return true;
+    }
+    const c = execTool(tx, invId, 'simulation', { id: 'c', name: 'compare_scenarios', args: {} });
+    logTool(tx, invId, 'simulation', 'compare_scenarios', 'Testing every fix in the simulation', c.line, 'SRV300', 'engine');
+    return true;
+  });
+}
+
+function v2Propose(ctx: PCtx, cfg: AiCfg, invId: bigint): boolean {
+  const pre = ctx.withTx(tx => {
+    const { inv, header } = ctxLine(tx, invId);
+    const kinds = inv.kind === 'structural_change'
+      ? [...assessRemoval(tx, inv.subject).parts.map(p => p.kind), ...(tx.db.wall.id.find(inv.subject)?.health === 'damaged' ? ['structural_repair'] : [])]
+      : Object.keys(ACTION_KINDS);
+    const priced = kinds.map(k => {
+      if (inv.kind === 'structural_change') { const p = assessRemoval(tx, inv.subject).parts.find(x => x.kind === k); return `${k}: ${p ? `${p.title}, ${money(p.cost)}` : 'Isolate Chiller 2 and inject the cracks, $6.5k'}`; }
+      return `${k}: ${ACTION_KINDS[k].title}, ${money(ACTION_KINDS[k].cost)}`;
+    }).join('\n');
+    const ev = [...tx.db.evidence.iter()].filter(e => e.invId === invId).map(e => `E${e.id}: ${e.fact}`).join('\n');
+    const hy = [...tx.db.hypothesis.iter()].filter(h => h.invId === invId).map(h => `H${h.id} ${h.assetId} ${Math.round(h.likelihood * 100)}%: ${h.text}`).join('\n');
+    return { header, kinds, priced, ev, hy };
+  });
+  const args = structured(ctx, cfg, invId, 'planner', true, false, `${pre.header}\n\n${ROLE_PROMPTS.propose}`,
+    `HYPOTHESES:\n${pre.hy || '(none)'}\nEVIDENCE:\n${pre.ev}\nACTIONS THAT APPLY (price list from the engine):\n${pre.priced}\nCall post_actions with the actions that address the problem.`, POST_ACTIONS(pre.kinds));
+  if (!args) return false;
+  return ctx.withTx(tx => {
+    let n = 0;
+    for (const aRaw of arr(args.actions).slice(0, 6)) {
+      const a = (aRaw ?? {}) as Json;
+      try { const r = execTool(tx, invId, 'planner', { id: 'a', name: 'post_action_candidate', args: { kind: a.kind, rationale: a.rationale } }); logTool(tx, invId, 'planner', 'post_action_candidate', 'Proposing a fix', r.line, '', cfg.large); n++; }
+      catch (e) { logTool(tx, invId, 'planner', 'post_action_candidate', 'Proposing a fix', '', '', cfg.large, false, String(e instanceof Error ? e.message : e)); }
+    }
+    return n > 0;
+  });
+}
+
+function v2Critique(ctx: PCtx, cfg: AiCfg, invId: bigint): boolean {
+  const pre = ctx.withTx(tx => { claim(tx, invId, 'critic'); const { header } = ctxLine(tx, invId); return { header, audit: audit(tx, invId), rounds: tx.db.investigation.id.find(invId)!.critiqueRounds }; });
+  const args = structured(ctx, cfg, invId, 'critic', true, true, `${pre.header}\n\n${ROLE_PROMPTS.critique}`,
+    `AUDIT OF THE BLACKBOARD (computed by the database):\n${pre.audit}\n${pre.rounds > 0 ? 'This is the re-check after your requests were answered.\n' : ''}Call post_critique. Send work back (revise) only for a real gap in the audit; name the agent_type that should close it.`, TOOLS.post_critique);
+  if (!args) return false;
+  return ctx.withTx(tx => {
+    try { const r = execTool(tx, invId, 'critic', { id: 'k', name: 'post_critique', args }); logTool(tx, invId, 'critic', 'post_critique', str(args.why) || 'Checking the plan for gaps', r.line, '', cfg.large); }
+    catch (e) { logTool(tx, invId, 'critic', 'post_critique', 'Checking the plan', '', '', cfg.large, false, String(e)); return false; }
+    const last = [...tx.db.agentStep.iter()].filter(s => s.invId === invId && s.tool === 'post_critique').sort((a, b) => b.seq - a.seq)[0];
+    if (last && last.result.startsWith('REVISE')) tx.db.agentStep.id.update({ ...last, status: 'revise' });
+    return true;
+  });
+}
+
+/** Send-backs: the database runs the check the Critic asked for (fast, exact); unknown asks go back to the specialist. */
+function v2Revise(ctx: PCtx, cfg: AiCfg, invId: bigint, agent: string, request: string): boolean {
+  const q = request.toLowerCase();
+  const done = ctx.withTx(tx => {
+    const inv = tx.db.investigation.id.find(invId)!;
+    if (inv.kind !== 'structural_change' && /chiller 1|ch-1|spare|capacity|carry/.test(q)) { const out = runOp(tx, inv, OPS[17], 17); logTool(tx, invId, 'simulation', 'simulate_cascade', 'Can Chiller 1 carry the server room during repair?', out.result, 'CH-1', 'engine'); return true; }
+    if (inv.kind !== 'structural_change' && /sensor|calibrat|faulty|drift/.test(q)) { const out = runOp(tx, inv, OPS[11], 11); logTool(tx, invId, 'signal', 'check_sensor_health', 'Could the sensor be wrong?', out.result, 'CH-2', 'engine'); return true; }
+    if (inv.kind === 'structural_change' && /inside|service|duct|pipe|conduit|sprinkler|shor|load path|carry/.test(q)) { const out = runWallOp(tx, invId, 7); logTool(tx, invId, 'structural', 'check_wall_services', 'Answering the Critic', out.result, '', 'engine'); return true; }
+    return false;
+  });
+  return done || v2Specialist(ctx, cfg, invId, agent, request);
+}
+
+function v2Decide(ctx: PCtx, cfg: AiCfg, invId: bigint): boolean {
+  const pre = ctx.withTx(tx => { const { header, inv } = ctxLine(tx, invId); return { header, facts: factSheet(tx, invId), kind: inv.kind, subject: inv.subject }; });
+  const args = structured(ctx, cfg, invId, 'planner', true, false, `${pre.header}\n\n${ROLE_PROMPTS.decide}`,
+    `FACTS:\n${pre.facts}\nCall write_decision. root_cause_hypothesis_id must be one of the HYPOTHESIS ids above (for a wall change, omit it). Only use numbers from the facts.`, WRITE_DECISION_V2);
+  if (!args) return false;
+  return ctx.withTx(tx => {
+    const hs = [...tx.db.hypothesis.iter()].filter(h => h.invId === invId).sort((a, b) => b.likelihood - a.likelihood);
+    let h = hs.find(x => Number(x.id) === Math.floor(num(args.root_cause_hypothesis_id, -1)));
+    let note = '';
+    if (pre.kind !== 'structural_change' && hs.length && (!h || h.likelihood + 0.05 < hs[0].likelihood)) { note = ' (the evidence favors the top hypothesis; corrected)'; h = hs[0]; }
+    let summary = str(args.summary).slice(0, 500);
+    const bad = unverified(summary, numbersIn(pre.facts));
+    if (bad.length) { logTool(tx, invId, 'planner', 'write_decision', 'Checking the decision', '', '', cfg.large, false, `unverified numbers ${bad.join(', ')}; using the engine's numbers`); summary = ''; }
+    let root = h?.text ?? '';
+    if (pre.kind === 'structural_change') {
+      const r = assessRemoval(tx, pre.subject), w = tx.db.wall.id.find(pre.subject)!;
+      root = `Remove ${w.name}: ${r.verdict.replace(/_/g, ' ')}${r.beam ? ` (${r.beam})` : ''}`;
+      summary = `${removalOk(r.verdict) ? 'Recommended' : 'Not recommended'}: ${money(r.cost)}, ${r.days} days. ${summary || r.reasons.join(' ')}`;
+      tx.db.wall.id.update({ ...w, proposalState: removalOk(r.verdict) ? 'recommended' : 'not_recommended' });
+    } else if (!summary) {
+      const dn = [...tx.db.scenario.iter()].find(s => s.label === 'do_nothing'), wp = [...tx.db.scenario.iter()].find(s => s.label === 'with_plan');
+      summary = `Outage risk ${Math.round((dn?.outageChance ?? 0) * 100)}% → ${Math.round((wp?.outageChance ?? 0) * 100)}%, impact ${money(dn?.impact ?? 0)} → ${money(wp?.impact ?? 0)}.`;
+    }
+    const conf = Math.max(0, Math.min(1, num(args.confidence, h?.likelihood ?? 0.8)));
+    tx.db.decision.insert({ id: 0n, invId, rootCause: root, likelihood: pre.kind === 'structural_change' ? conf : h?.likelihood ?? conf,
+      summary: `${summary}${args.what_would_change_my_mind ? ` Would change our mind: ${str(args.what_would_change_my_mind).slice(0, 160)}` : ''}${note}` });
+    logTool(tx, invId, 'planner', 'write_decision', str(args.why) || 'Writing the decision', `${root.slice(0, 90)}${note}`, '', cfg.large);
+    return true;
+  });
+}
+
+function v2Narrate(ctx: PCtx, cfg: AiCfg, invId: bigint): boolean {
+  const pre = ctx.withTx(tx => { const { header } = ctxLine(tx, invId); return { header, facts: factSheet(tx, invId) }; });
+  let feedback = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const args = structured(ctx, cfg, invId, 'narrator', true, false, `${pre.header}\n\n${ROLE_PROMPTS.narrate}\nSpeak like a calm colleague. Use names (Chiller 2, Server Room 300, Northwind Analytics), never raw ids. Every number must come from the FACTS.`,
+      `FACTS:\n${pre.facts}\n${feedback}Call post_answers.`, POST_ANSWERS);
+    if (!args) return false;
+    const result = ctx.withTx(tx => {
+      const issues: string[] = [];
+      for (const role of ['technician', 'manager'] as const) {
+        const text = str(args[role]).replace(/\*\*/g, '').trim();
+        const problems = text ? verifyAnswer(tx, invId, text, pre.facts) : ['empty'];
+        if (problems.length) { issues.push(`${role}: ${problems.join('; ')}`); logTool(tx, invId, 'narrator', 'verify_claims', `Fact-checking the ${role} answer`, '', '', cfg.large, false, problems.join('; ')); continue; }
+        for (const old of [...tx.db.answer.iter()]) if (old.invId === invId && old.role === role) tx.db.answer.id.delete(old.id);
+        tx.db.answer.insert({ id: 0n, invId, role, text: text.slice(0, 420), byNemotron: true });
+        logTool(tx, invId, 'narrator', 'verify_claims', `Fact-checking the ${role} answer`, `every number and name checked against the facts (${numbersIn(text).length} numbers)`, '', cfg.large);
+      }
+      return issues;
+    });
+    if (!result.length) break;
+    feedback = `YOUR LAST ANSWERS FAILED FACT-CHECKING: ${result.join(' | ')}. Rewrite them using only the FACTS.\n`;
+  }
+  return ctx.withTx(tx => {
+    const inv = tx.db.investigation.id.find(invId)!;
+    const missing = ['technician', 'manager'].filter(r => ![...tx.db.answer.iter()].some(a => a.invId === invId && a.role === r));
+    if (missing.length) {
+      // verified template for any role that failed twice (scripted narrator writes both; keep the verified Nemotron one)
+      const keep = [...tx.db.answer.iter()].filter(a => a.invId === invId);
+      if (inv.kind === 'structural_change') runWallOp(tx, invId, 11); else runOp(tx, inv, OPS[20], 20);
+      for (const a of [...tx.db.answer.iter()]) if (a.invId === invId && keep.some(k => k.role === a.role) && !keep.some(k => k.id === a.id)) tx.db.answer.id.delete(a.id);
+    }
+    const top = [...tx.db.hypothesis.iter()].filter(h => h.invId === invId).sort((a, b) => b.likelihood - a.likelihood)[0];
+    if (inv.kind !== 'structural_change') {
+      const target = top && tx.db.asset.id.find(top.assetId) ? top.assetId : 'CH-2';
+      emit(tx, { kind: 'guide_trail', target, forRole: 'technician' });
+      emit(tx, { kind: 'thread', ids: [target, 'AHU-2', 'SRV300'] });
+    }
+    return true;
+  });
+}
+
+/** Self-grading: did the investigation reach the right conclusion, with verified claims? */
+function gradeInvestigation(tx: Ctx, invId: bigint) {
+  const inv = tx.db.investigation.id.find(invId)!;
+  if (inv.mode !== 'nemotron') return;
+  const top = [...tx.db.hypothesis.iter()].filter(h => h.invId === invId).sort((a, b) => b.likelihood - a.likelihood)[0];
+  const acts = [...tx.db.actionCandidate.iter()].filter(a => a.invId === invId);
+  const answers = [...tx.db.answer.iter()].filter(a => a.invId === invId);
+  const verified = answers.filter(a => a.byNemotron).length;
+  let correct: boolean;
+  if (inv.kind === 'structural_change') {
+    const r = assessRemoval(tx, inv.subject);
+    correct = acts.some(a => a.recommended) === removalOk(r.verdict) || (!removalOk(r.verdict) && acts.every(a => !a.recommended || a.kind === 'structural_repair'));
+  } else correct = top?.assetId === 'CH-2' && acts.some(a => a.kind === 'work_order') && acts.some(a => a.kind === 'load_shift');
+  const secs = Number(tx.timestamp.microsSinceUnixEpoch - inv.createdAt.microsSinceUnixEpoch) / 1e6;
+  const calls = [...tx.db.llmCall.iter()].filter(l => l.invId === invId).length;
+  tx.db.evalResult.insert({ id: 0n, runId: `inv-${invId}`, caseId: inv.kind, mode: 'investigation', answer: JSON.stringify({ root: top?.assetId, actions: acts.map(a => a.kind), verified }),
+    correct, latencyMs: secs * 1000, toolCalls: calls, grounded: verified === 2 });
+  const rows = [...tx.db.evalResult.iter()].filter(r => r.mode === 'investigation');
+  const ok = rows.filter(r => r.correct).length;
+  const secsAll = rows.map(r => r.latencyMs / 1000).sort((a, b) => a - b);
+  setMetric(tx, 'eval.investigation.accuracy', 'Nemotron team: correct conclusion, end to end', ok / rows.length, 'ratio', `${ok}/${rows.length} investigations (root cause + plan, or wall verdict)`, 'reasoning');
+  setMetric(tx, 'eval.investigation.verified', 'Spoken answers passing fact-check (numbers, names, polarity)', rows.filter(r => r.grounded).length / rows.length, 'ratio', `${rows.filter(r => r.grounded).length}/${rows.length} investigations, both roles`, 'grounding');
+  setMetric(tx, 'eval.investigation.ttd_p50', 'Nemotron team: question → decision (median)', secsAll[Math.floor(secsAll.length / 2)], 's', `${calls} model calls in the last run`, 'agents');
+}
+
+/** Run one phase of the v2 pipeline. */
+function runPhaseV2(ctx: PCtx, cfg: AiCfg, invId: bigint, phase: string, note: string): boolean {
+  const base = phase.split(':')[0];
+  switch (base) {
+    case 'plan': return v2Plan(ctx, cfg, invId);
+    case 'signal': case 'historian': case 'lease': case 'structural': return v2Specialist(ctx, cfg, invId, base);
+    case 'hypothesize': return v2Hypothesize(ctx, cfg, invId);
+    case 'simulate': return v2Deterministic(ctx, invId, 'simulate');
+    case 'propose': return v2Propose(ctx, cfg, invId);
+    case 'compare': return v2Deterministic(ctx, invId, 'compare');
+    case 'critique': return v2Critique(ctx, cfg, invId);
+    case 'revise': return v2Revise(ctx, cfg, invId, note.split('|')[0], note.split('|').slice(1).join('|'));
+    case 'decide': return v2Decide(ctx, cfg, invId);
+    case 'narrate': return v2Narrate(ctx, cfg, invId);
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------- key + model check
 
-const MODEL_SKIP = /embed|rerank|reward|safety|guard|vl|vision|parse|ocr|retriev|content|audio|asr|tts|nemoguard|clip|instruct-70b-reward|math|code/i;
+const MODEL_SKIP = /embed|rerank|reward|safety|guard|parse|ocr|retriev|content|audio|asr|tts|nemoguard|clip|math|code/i;
 
 function pickModels(ids: string[]): { large: string; small: string } {
   const nem = ids.filter(id => /nemotron/i.test(id) && !MODEL_SKIP.test(id)).sort().reverse();
   const by = (re: RegExp) => nem.find(id => re.test(id)) ?? '';
-  const large = by(/nemotron-3.*super|nemotron-3.*ultra/i) || by(/super-49b-v1\.5/) || by(/super/i) || by(/ultra/i) || nem[0] || '';
-  const small = by(/nemotron-3.*nano/i) || by(/nemotron-nano-9b-v2|nano-9b/i) || by(/nano/i) || large;
+  const large = by(/nemotron-3\.5.*super/i) || by(/nemotron-3.*super|nemotron-3.*ultra/i) || by(/super-49b-v1\.5/) || by(/super/i) || by(/ultra/i) || nem[0] || '';
+  const small = by(/nemotron-3\.5.*nano/i) || by(/nemotron-3.*nano/i) || by(/nemotron-nano-9b-v2|nano-9b/i) || large;
   return { large, small };
 }
 
@@ -1716,7 +2830,7 @@ export const nemotronCheck = spacetimedb.procedure({ onSchedule: nemotronCheckJo
     if (!large) { setStatus(false, '', '', 'No Nemotron chat model available for this key.'); return {}; }
     const ping = ctx.http.fetch(`${s.base}/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` }, timeout: TimeDuration.fromMillis(40000),
-      body: JSON.stringify({ model: small, max_tokens: 8, messages: [{ role: 'system', content: '/no_think' }, { role: 'user', content: 'Reply with OK.' }] }),
+      body: JSON.stringify({ model: small, max_tokens: 16, messages: [{ role: 'user', content: 'Reply with OK.' }], ...(/nemotron-3/.test(small) ? { chat_template_kwargs: { enable_thinking: false } } : {}) }),
     });
     if (ping.status !== 200) { setStatus(false, large, small, `Model ${small} failed (HTTP ${ping.status}).`); return {}; }
     setStatus(true, large, small, `Nemotron team online: ${large.split('/').pop()} + ${small.split('/').pop()}`);
@@ -1748,6 +2862,300 @@ export const recheckNemotron = spacetimedb.reducer(ctx => {
   ctx.db.nemotronCheckJob.insert({ scheduledId: 0n, scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + 50_000n) });
 });
 
+
+// ================================================================ evaluation harness + metrics
+// A ground-truth benchmark (as-built drawings + a structural engineer's answers) graded
+// three ways: plan-only baseline, framing-aware solver, and the Nemotron agent end to end.
+// Every number lands in the `metric` table (also served at GET /metrics), next to grounding
+// stats from the tool/LLM call logs and backend timings measured inside the database.
+
+type Expected = { bearing?: boolean; verdict?: string; beam?: string; supports?: string[] };
+const EVAL_CASES: { id: string; question: string; kind: string; subject: string; expected: Expected }[] = [
+  { id: 'C01', kind: 'classify', subject: 'W-MECH-E', question: 'Is the Mechanical room east wall load-bearing?', expected: { bearing: true } },
+  { id: 'C02', kind: 'classify', subject: 'W-200-COM', question: 'Is the Suite 200 / Commons wall load-bearing?', expected: { bearing: true } },
+  { id: 'C03', kind: 'classify', subject: 'W-100-200', question: 'Is the Suite 100 / Suite 200 wall load-bearing?', expected: { bearing: false } },
+  { id: 'C04', kind: 'classify', subject: 'W-300-SRV', question: 'Is the Suite 300 / Server Room wall load-bearing?', expected: { bearing: false } },
+  { id: 'C05', kind: 'classify', subject: 'W-SPINE-N', question: 'Is the corridor north wall load-bearing?', expected: { bearing: true } },
+  { id: 'C06', kind: 'classify', subject: 'W-LOB-100', question: 'Is the Lobby / Suite 100 wall load-bearing?', expected: { bearing: false } },
+  { id: 'R01', kind: 'removal', subject: 'W-300-SRV', question: 'Can we remove the Suite 300 / Server Room wall?', expected: { verdict: 'go' } },
+  { id: 'R02', kind: 'removal', subject: 'W-100-200', question: 'Can we remove the Suite 100 / Suite 200 wall?', expected: { verdict: 'go' } },
+  { id: 'R03', kind: 'removal', subject: 'W-SRV-400', question: 'Can we remove the Server Room / Suite 400 wall?', expected: { verdict: 'not_allowed' } },
+  { id: 'R04', kind: 'removal', subject: 'W-200-COM', question: 'Can we remove the Suite 200 / Commons wall, and what beam would it take?', expected: { verdict: 'go_with_beam', beam: 'W14x48' } },
+  { id: 'R05', kind: 'removal', subject: 'W-MECH-E', question: 'Can we remove the Mechanical room east wall?', expected: { verdict: 'not_now' } },
+  { id: 'R06', kind: 'removal', subject: 'W-SPINE-S', question: 'Can we remove the whole corridor south wall?', expected: { verdict: 'not_feasible' } },
+  { id: 'R07', kind: 'removal', subject: 'W-EXT-N', question: 'Can we remove the north exterior wall?', expected: { verdict: 'not_now' } },
+  { id: 'L01', kind: 'loadpath', subject: 'RT-1', question: 'Which walls hold up the cooling tower (RT-1)?', expected: { supports: ['W-EXT-W', 'W-MECH-E'] } },
+  { id: 'L02', kind: 'loadpath', subject: 'RT-2', question: 'Which walls hold up the rooftop unit over the Commons (RT-2)?', expected: { supports: ['W-200-COM', 'W-EXT-E'] } },
+];
+
+function seedEvalCases(ctx: Ctx) {
+  clearTable(ctx.db.evalCase.iter(), r => ctx.db.evalCase.id.delete(r.id));
+  for (const c of EVAL_CASES) ctx.db.evalCase.insert({ id: c.id, question: c.question, kind: c.kind, subject: c.subject, expected: JSON.stringify(c.expected) });
+}
+
+const NAIVE_BEAM = (span: number) => span <= 4 ? 'W8x18' : span <= 6 ? 'W10x26' : span <= 9 ? 'W12x35' : 'W14x48';
+
+/** The answer a reasoner gives for one case. */
+function answerCase(ctx: Ctx, c: typeof EVAL_CASES[number], mode: 'plan_only' | 'solver'): Expected {
+  const w = ctx.db.wall.id.find(c.subject);
+  if (c.kind === 'classify') return { bearing: mode === 'solver' ? w!.kind !== 'partition' : w!.planOnlyBearing };
+  if (c.kind === 'removal') {
+    if (mode === 'solver') { const a = assessRemoval(ctx, c.subject); return { verdict: a.verdict, beam: a.beam || undefined }; }
+    // plan-only: no framing, no code or condition checks
+    if (w!.kind === 'exterior') return { verdict: 'not_now' };
+    if (!w!.planOnlyBearing) return { verdict: 'go' };
+    return { verdict: 'go_with_beam', beam: NAIVE_BEAM(wallLen(w!)) };
+  }
+  // load path
+  if (mode === 'solver') {
+    const walls = new Set(loadPath(ctx, c.subject).flat().filter(id => ctx.db.wall.id.find(id)));
+    return { supports: [...walls].filter(id => [...ctx.db.elementEdge.fromId.filter(id)].some(e => e.toId === c.subject)).sort() };
+  }
+  // plan-only: the walls of the room under the load
+  const p = ctx.db.element.id.find(c.subject)!;
+  const room = [...ctx.db.room.iter()].find(r => p.x0 >= r.x0 && p.x0 <= r.x1 && p.z0 >= r.z0 && p.z0 <= r.z1);
+  return { supports: room ? [...ctx.db.wall.iter()].filter(wl => roomsBeside(ctx, wl).some(r => r.id === room.id)).map(wl => wl.id).sort() : [] };
+}
+
+function grade(expected: Expected, got: Expected): boolean {
+  if (expected.bearing !== undefined && expected.bearing !== got.bearing) return false;
+  if (expected.verdict !== undefined && expected.verdict !== got.verdict) return false;
+  if (expected.beam !== undefined && expected.beam !== got.beam) return false;
+  if (expected.supports !== undefined && JSON.stringify([...expected.supports].sort()) !== JSON.stringify([...(got.supports ?? [])].sort())) return false;
+  return true;
+}
+
+function setMetric(ctx: Ctx, key: string, label: string, value: number, unit: string, detail: string, group: string) {
+  const row = { key, label, value: Math.round(value * 1000) / 1000, unit, detail, group, at: ctx.timestamp };
+  if (ctx.db.metric.key.find(key)) ctx.db.metric.key.update(row); else ctx.db.metric.insert(row);
+}
+
+/** Grade the deterministic reasoners on every case and record accuracy metrics. */
+function runDeterministicEval(ctx: Ctx) {
+  const runId = `det-${ctx.timestamp.microsSinceUnixEpoch}`;
+  for (const mode of ['plan_only', 'solver'] as const) {
+    const byKind = new Map<string, [number, number]>();
+    for (const c of EVAL_CASES) {
+      const got = answerCase(ctx, c, mode);
+      const ok = grade(c.expected, got);
+      ctx.db.evalResult.insert({ id: 0n, runId, caseId: c.id, mode, answer: JSON.stringify(got), correct: ok, latencyMs: 0, toolCalls: 0, grounded: true });
+      const k = byKind.get(c.kind) ?? [0, 0]; k[0] += ok ? 1 : 0; k[1]++; byKind.set(c.kind, k);
+    }
+    const all = [...byKind.values()].reduce((s, [a, b]) => [s[0] + a, s[1] + b], [0, 0]);
+    const label = mode === 'solver' ? 'Framing-aware reasoning' : 'Plan-only baseline';
+    setMetric(ctx, `eval.${mode}.accuracy`, `${label}: benchmark accuracy`, all[0] / all[1], 'ratio', `${all[0]}/${all[1]} cases`, 'reasoning');
+    for (const [kind, [a, b]] of byKind) setMetric(ctx, `eval.${mode}.${kind}`, `${label}: ${kind}`, a / b, 'ratio', `${a}/${b}`, 'reasoning');
+  }
+  // load-bearing classification precision/recall vs as-built, both reasoners
+  const truth = new Set(HARBOR_POINT.asBuilt.bearing);
+  for (const mode of ['plan_only', 'solver'] as const) {
+    let tp = 0, fp = 0, fn = 0, tn = 0;
+    for (const w of ctx.db.wall.iter()) {
+      const pred = mode === 'solver' ? w.kind !== 'partition' : w.planOnlyBearing;
+      const t2 = truth.has(w.id);
+      if (pred && t2) tp++; else if (pred && !t2) fp++; else if (!pred && t2) fn++; else tn++;
+    }
+    const label = mode === 'solver' ? 'Framing-aware' : 'Plan-only';
+    setMetric(ctx, `structure.${mode}.recall`, `${label}: load-bearing walls found (recall)`, tp / Math.max(1, tp + fn), 'ratio', `${tp} of ${tp + fn} bearing walls`, 'reasoning');
+    setMetric(ctx, `structure.${mode}.precision`, `${label}: load-bearing precision`, tp / Math.max(1, tp + fp), 'ratio', `${fp} false alarms`, 'reasoning');
+    setMetric(ctx, `structure.${mode}.accuracy`, `${label}: wall classification accuracy`, (tp + tn) / Math.max(1, tp + tn + fp + fn), 'ratio', `${tp + tn}/${tp + tn + fp + fn} walls`, 'reasoning');
+  }
+}
+
+/** Grounding and agent stats from the call logs (Nemotron runs) and the blackboard. */
+function refreshAgentMetrics(ctx: Ctx) {
+  const tools = [...ctx.db.toolCall.iter()];
+  const llm = [...ctx.db.llmCall.iter()];
+  if (tools.length) {
+    const rejected = tools.filter(t2 => !t2.ok).length;
+    setMetric(ctx, 'grounding.tool_calls', 'Agent tool calls executed in-database', tools.length, 'calls', `${rejected} rejected by validation`, 'grounding');
+    setMetric(ctx, 'grounding.rejection_rate', 'Invalid claims/ids caught before they reached the blackboard', rejected / tools.length, 'ratio', 'unknown ids, missing citations, bad kinds', 'grounding');
+  }
+  const ev = [...ctx.db.evidence.iter()];
+  if (ev.length) setMetric(ctx, 'grounding.cited', 'Evidence rows citing an existing source row', 1, 'ratio', `${ev.length} pieces, all validated at insert`, 'grounding');
+  if (llm.length) {
+    const ok = llm.filter(l => l.ok);
+    const ms = ok.map(l => l.ms).sort((a, b) => a - b);
+    const pct = (p: number) => ms.length ? ms[Math.min(ms.length - 1, Math.floor(p * ms.length))] : 0;
+    setMetric(ctx, 'agents.llm_calls', 'Nemotron calls', llm.length, 'calls', `${llm.length - ok.length} failed`, 'agents');
+    setMetric(ctx, 'agents.llm_p50_ms', 'Nemotron latency p50', pct(0.5), 'ms', `p95 ${Math.round(pct(0.95))} ms`, 'agents');
+    setMetric(ctx, 'agents.tokens', 'Tokens used', ok.reduce((s, l) => s + l.promptTokens + l.completionTokens, 0), 'tokens', 'prompt + completion', 'agents');
+  }
+  const crit = [...ctx.db.critique.iter()];
+  if (crit.length) setMetric(ctx, 'agents.critic_sendbacks', 'Critic send-backs', crit.filter(c => c.verdict === 'revise').length, 'count', `${crit.length} critiques`, 'agents');
+}
+
+/** Run the deterministic benchmark (plan-only vs framing-aware) and refresh all metrics. */
+export const runEval = spacetimedb.reducer(ctx => {
+  runDeterministicEval(ctx);
+  refreshAgentMetrics(ctx);
+});
+
+/** Owner-only: external benchmark results (e.g. client round-trip latency) land here. */
+export const recordMetric = spacetimedb.reducer({ key: t.string(), label: t.string(), value: t.f64(), unit: t.string(), detail: t.string(), group: t.string() },
+  (ctx, { key, label, value, unit, detail, group }) => {
+    const o = ctx.db.owner.id.find(0);
+    if (!o || !o.identity.equals(ctx.sender)) throw new SenderError('only the database owner can record metrics');
+    setMetric(ctx, key, label, value, unit, detail, group);
+  });
+
+/** Round-trip probe for client benchmarks: the client times call → subscription update. */
+export const benchPing = spacetimedb.reducer({ seq: t.u32() }, (ctx, { seq }) => {
+  ctx.db.benchEcho.insert({ seq, at: ctx.timestamp });
+});
+
+/** Backend timings measured inside the database (transaction timestamps around the work). */
+export const benchBackend = spacetimedb.procedure(t.unit(), ctx => {
+  const now = () => ctx.withTx(tx => tx.timestamp.microsSinceUnixEpoch);
+  const t0 = now();
+  const sims = ctx.withTx(tx => { const b = loadBuilding(tx); const f = forecastThreshold(tx, 'CH-2'); for (let i = 0; i < 300; i++) simulate(b, NO_PLAN, f.hours, 0.8 + (i % 10) / 20); return 300; });
+  const t1 = now();
+  ctx.withTx(tx => { const b = loadBuilding(tx); const f = forecastThreshold(tx, 'CH-2'); riskEstimate(tx, b, NO_PLAN, f.hours, failureChance(tx, 'CH-2')); });
+  const t2 = now();
+  ctx.withTx(tx => { for (const w of [...tx.db.wall.iter()]) assessRemoval(tx, w.id); for (const p of HARBOR_POINT.pointLoads) loadPath(tx, p.id); });
+  const t3 = now();
+  ctx.withTx(tx => {
+    const simMs = Number(t1 - t0) / 1000, riskMs = Number(t2 - t1) / 1000, structMs = Number(t3 - t2) / 1000;
+    setMetric(tx, 'backend.sim_per_sec', 'Cascade simulations per second (in-database)', simMs > 0 ? sims / (simMs / 1000) : 0, 'runs/s', `${sims} × 145-tick runs in ${simMs.toFixed(1)} ms`, 'backend');
+    setMetric(tx, 'backend.risk_ms', '50-run risk estimate', riskMs, 'ms', 'Monte Carlo inside one transaction', 'backend');
+    setMetric(tx, 'backend.struct_ms', 'Structural what-ifs: every wall + load paths', structMs, 'ms', `${tx.db.wall.count()} removals sized + ${HARBOR_POINT.pointLoads.length} load paths`, 'backend');
+  });
+  return {};
+});
+
+// ---- Nemotron agent on the benchmark (end to end, graded)
+const ANSWER_TOOL: ToolDef = { name: 'submit_answer', description: 'Submit your final answer for this case.', params: { ...W,
+  bearing: { type: 'boolean', description: 'for classification cases' },
+  verdict: { type: 'string', enum: ['go', 'go_with_beam', 'not_now', 'not_allowed', 'not_feasible'], description: 'for removal cases' },
+  beam: { type: 'string', description: 'steel section if a beam is needed, e.g. W12x35' },
+  supports: { type: 'array', items: { type: 'string' }, description: 'wall ids that directly hold up the load, for load-path cases' } }, required: ['why'] };
+const EVAL_TOOLS = ['get_structure', 'get_load_path', 'assess_wall_removal', 'check_code', 'check_wall_services', 'get_inspection_issues'];
+
+export const agentEval = spacetimedb.procedure({ onSchedule: evalJob }, { job: evalJob.rowType }, t.unit(), (ctx, { job }) => {
+  const cfg = ctx.withTx(tx => cfgOf(tx));
+  if (!cfg) return {};
+  const llmOnly = job.caseIds.startsWith('llm_only');
+  const ids = job.caseIds.replace(/^llm_only:?/, '');
+  const cases = ids ? EVAL_CASES.filter(c => ids.split(',').includes(c.id)) : EVAL_CASES;
+  const runId = `${llmOnly ? 'llm' : 'agent'}-${job.scheduledId}`;
+  const mode = llmOnly ? 'llm_only' : 'agent';
+  for (const c of cases) {
+    const t0 = ctx.withTx(tx => tx.timestamp.microsSinceUnixEpoch);
+    const tools = llmOnly ? [ANSWER_TOOL] : [...EVAL_TOOLS.map(n => TOOLS[n]), ANSWER_TOOL];
+    const bpText = JSON.stringify({ ...HARBOR_POINT, asBuilt: undefined, rooms: ROOMS.map(r => ({ id: r[0], name: r[1], kind: r[2], x0: r[3], z0: r[4], x1: r[5], z1: r[6] })),
+      issues: ISSUES.map(i => ({ id: i[0], kind: i[1], title: i[3], detail: i[4], room: i[6] })) });
+    const messages: Json[] = llmOnly ? [
+      { role: 'system', content: `${thinkPrefix(cfg.large, true)}\nYou are a structural engineer. Use the blueprint below (walls, roof framing bays with span direction and kPa loads, rooftop point loads, rooms, inspection findings). Material capacities in kN/m: Reinforced CMU 40, CMU 30, Steel stud + CMU core 26; cracked walls lose 15%. Beams: choose the lightest of W8x18 (S 249 cm³, I 2580 cm⁴), W10x26 (454, 5080), W12x35 (749, 11900), W14x48 (1150, 20100), W16x57 (1520, 31000), W18x71 (2240, 48300), W21x83 (2810, 70800), W24x104 (4000, 129000) meeting bending (0.66·Fy, Fy=345 MPa) and L/360 deflection (E=200 GPa). Verdicts: go, go_with_beam, not_now (exterior or damaged), not_allowed (code), not_feasible (no single beam works). Call submit_answer exactly once.\nBLUEPRINT: ${bpText}` },
+      { role: 'user', content: c.question },
+    ] : [
+      { role: 'system', content: `${thinkPrefix(cfg.large, true)}\nYou are the Structural Engineer agent of Cascade for "Harbor Point, Floor 3". Answer only from tool results. Call tools, then call submit_answer exactly once. Wall ids: ${HARBOR_POINT.walls.map(w => w.id).join(', ')}. Rooftop loads: RT-1, RT-2.` },
+      { role: 'user', content: c.question },
+    ];
+    let answer: Expected | null = null, calls = 0, grounded = true;
+    for (let round = 0; round < 6 && !answer; round++) {
+      let out: ChatOut;
+      try { out = chat(ctx, cfg, cfg.large, messages, tools, true, { invId: 0n, agent: llmOnly ? 'eval-llm-only' : 'eval' }); } catch { break; }
+      if (!out.calls.length) { messages.push({ role: 'assistant', content: out.content || '(none)' }, { role: 'user', content: 'Use the tools, then call submit_answer.' }); continue; }
+      messages.push({ role: 'assistant', content: out.content || null, tool_calls: out.calls.map(k => ({ id: k.id, type: 'function', function: { name: k.name, arguments: JSON.stringify(k.args) } })) });
+      for (const k of out.calls) {
+        calls++;
+        if (k.name === 'submit_answer') {
+          answer = { bearing: typeof k.args.bearing === 'boolean' ? k.args.bearing : undefined, verdict: str(k.args.verdict) || undefined, beam: str(k.args.beam) || undefined,
+            supports: Array.isArray(k.args.supports) ? (k.args.supports as unknown[]).map(x => str(x)) : undefined };
+          messages.push({ role: 'tool', tool_call_id: k.id, name: k.name, content: '{"ok":true}' });
+          continue;
+        }
+        let result: unknown, ok = true, err = '';
+        if (!EVAL_TOOLS.includes(k.name)) { ok = false; err = `tool ${k.name} not available`; result = { error: err }; }
+        else {
+          try { result = ctx.withTx(tx => execTool(tx, 0n, 'structural', k).out); }
+          catch (e) { ok = false; err = String(e instanceof Error ? e.message : e); result = { error: err }; }
+        }
+        if (!ok) grounded = false;
+        ctx.withTx(tx => tx.db.toolCall.insert({ id: 0n, invId: 0n, agent: 'eval', tool: k.name, ok, error: err.slice(0, 200), model: cfg.large, ms: 0 }));
+        messages.push({ role: 'tool', tool_call_id: k.id, name: k.name, content: JSON.stringify(result).slice(0, 3500) });
+      }
+    }
+    const t1 = ctx.withTx(tx => tx.timestamp.microsSinceUnixEpoch);
+    const ok = answer ? grade(c.expected, answer) : false;
+    ctx.withTx(tx => tx.db.evalResult.insert({ id: 0n, runId, caseId: c.id, mode, answer: JSON.stringify(answer ?? {}), correct: ok,
+      latencyMs: Number(t1 - t0) / 1000, toolCalls: calls, grounded }));
+  }
+  ctx.withTx(tx => {
+    const rows = [...tx.db.evalResult.iter()].filter(r => r.runId === runId);
+    const correct = rows.filter(r => r.correct).length;
+    const lat = rows.map(r => r.latencyMs).sort((a, b) => a - b);
+    if (llmOnly) {
+      setMetric(tx, 'eval.llm_only.accuracy', 'Same model, no tools (blueprint in prompt)', correct / Math.max(1, rows.length), 'ratio', `${correct}/${rows.length} cases · ${cfg.large.split('/').pop()}`, 'reasoning');
+      return;
+    }
+    setMetric(tx, 'eval.agent.accuracy', 'Nemotron agent: benchmark accuracy', correct / Math.max(1, rows.length), 'ratio', `${correct}/${rows.length} cases · ${cfg.large.split('/').pop()}`, 'reasoning');
+    setMetric(tx, 'eval.agent.latency_p50', 'Nemotron agent: time per case (p50)', lat[Math.floor(lat.length / 2)] ?? 0, 'ms', `p95 ${Math.round(lat[Math.min(lat.length - 1, Math.floor(lat.length * 0.95))] ?? 0)} ms`, 'agents');
+    setMetric(tx, 'eval.agent.tool_calls', 'Nemotron agent: tool calls per case', rows.reduce((s, r) => s + r.toolCalls, 0) / Math.max(1, rows.length), 'calls', 'including submit_answer', 'agents');
+    setMetric(tx, 'eval.agent.grounded', 'Nemotron agent: cases with no rejected tool call', rows.filter(r => r.grounded).length / Math.max(1, rows.length), 'ratio', 'every id it used existed', 'grounding');
+    refreshAgentMetrics(tx);
+  });
+  return {};
+});
+
+/** Queue the Nemotron agent on the benchmark (all cases, or a comma list of case ids). */
+/** caseIds: "" = all cases; "C01,R04" = some; prefix "llm_only:" = ablation without tools. */
+export const runAgentEval = spacetimedb.reducer({ caseIds: t.string() }, (ctx, { caseIds }) => {
+  if (!nemotronReady(ctx)) throw new SenderError('set an NVIDIA key first (set_nvidia_key)');
+  ctx.db.evalJob.insert({ scheduledId: 0n, scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + 50_000n), caseIds });
+});
+
+// ---- HTTP API: the database is the server
+const json = (body: unknown, status = 200) => new SyncResponse(JSON.stringify(body, null, 1), { status, headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' } });
+
+export const httpMetrics = spacetimedb.httpHandler(ctx => json(ctx.withTx(tx => [...tx.db.metric.iter()]
+  .sort((a, b) => a.group.localeCompare(b.group) || a.key.localeCompare(b.key))
+  .map(m => ({ key: m.key, group: m.group, label: m.label, value: m.value, unit: m.unit, detail: m.detail })))));
+
+export const httpStructure = spacetimedb.httpHandler(ctx => json(ctx.withTx(tx => [...tx.db.wall.iter()].map(w => ({
+  id: w.id, name: w.name, kind: w.kind, load_kN_per_m: w.loadKnm, capacity_kN_per_m: w.capacityKnm, utilization: w.utilization, condition: w.health,
+  plan_only_guess: w.planOnlyBearing ? 'bearing' : 'partition', carries: w.carries, inside: w.services,
+})))));
+
+function tokenOk(ctx: { withTx<T>(f: (tx: Ctx) => T): T }, req: { headers: { get(name: string): string | null } }): boolean {
+  const need = ctx.withTx(tx => secretOf(tx, 'ingest_token'));
+  return !need || req.headers.get('x-ingest-token') === need;
+}
+
+/** IoT ingest: POST {"asset":"CH-2","value":5.4} → live reading (watchdog sees it next tick). */
+export const httpSensor = spacetimedb.httpHandler((ctx, req) => {
+  if (!tokenOk(ctx, req)) return json({ error: 'bad token' }, 401);
+  let body: Json;
+  try { body = JSON.parse(req.text()) as Json; } catch { return json({ error: 'body must be JSON' }, 400); }
+  const id = str(body.asset), value = num(body.value, NaN);
+  if (!isFinite(value)) return json({ error: 'value must be a number' }, 400);
+  const ok = ctx.withTx(tx => {
+    const a = tx.db.asset.id.find(id);
+    if (!a) return false;
+    tx.db.asset.id.update({ ...a, reading: value });
+    return true;
+  });
+  return ok ? json({ ok: true, asset: id, value }) : json({ error: `unknown asset '${id}'` }, 404);
+});
+
+/** Blueprint ingest: POST a blueprint JSON → knowledge graph + structural analysis rebuilt in one transaction. */
+export const httpBlueprint = spacetimedb.httpHandler((ctx, req) => {
+  if (!tokenOk(ctx, req)) return json({ error: 'bad token' }, 401);
+  let bp: Blueprint;
+  try { bp = JSON.parse(req.text()) as Blueprint; } catch { return json({ error: 'body must be a blueprint JSON' }, 400); }
+  if (!bp.walls?.length || !bp.bays?.length) return json({ error: 'blueprint needs walls and bays' }, 400);
+  const n = ctx.withTx(tx => { ingestBlueprint(tx, bp); runDeterministicEval(tx); return tx.db.element.count(); });
+  return json({ ok: true, blueprint: bp.id, elements: Number(n) });
+});
+
+export const httpHealth = spacetimedb.httpHandler(() => json({ ok: true, service: 'cascade' }));
+
+export const routes = spacetimedb.httpRouter(new Router()
+  .get('/health', httpHealth)
+  .get('/metrics', httpMetrics)
+  .get('/structure', httpStructure)
+  .post('/sensor', httpSensor)
+  .post('/blueprint', httpBlueprint));
 
 // ================================================================ live data: replay + watchdog
 
@@ -1787,6 +3195,7 @@ function startReplay(ctx: Ctx) {
 }
 
 function resetAll(ctx: Ctx) {
+  clearTable(ctx.db.fieldNote.iter(), r => ctx.db.fieldNote.id.delete(r.id));
   clearTable(ctx.db.agentTick.iter(), r => ctx.db.agentTick.scheduledId.delete(r.scheduledId));
   clearBlackboard(ctx);
   seedBuilding(ctx);
@@ -1855,6 +3264,13 @@ export const ask = spacetimedb.reducer({ text: t.string() }, (ctx, { text }) => 
   const q = text.trim();
   if (!q) throw new SenderError('empty question');
   clearTable(ctx.db.agentTick.iter(), r => ctx.db.agentTick.scheduledId.delete(r.scheduledId));
+  const wallId = wallFromText(ctx, q);
+  if (wallId) {
+    for (const other of [...ctx.db.wall.iter()]) if (other.proposal) ctx.db.wall.id.update({ ...other, proposal: '', proposalState: '' });
+    ctx.db.wall.id.update({ ...ctx.db.wall.id.find(wallId)!, proposal: 'remove', proposalState: 'evaluating' });
+    openInvestigation(ctx, q, 'ask', me(ctx).name, 'structural_change', wallId);
+    return;
+  }
   openInvestigation(ctx, q, 'ask', me(ctx).name);
 });
 
@@ -1880,6 +3296,23 @@ export const executeAction = spacetimedb.reducer(ctx => {
   const approved = [...ctx.db.actionCandidate.iter()].filter(a => a.invId === inv.id && a.status === 'approved');
   if (!approved.length) throw new SenderError('approve at least one action first');
 
+  if (inv.kind === 'structural_change') {
+    const w = ctx.db.wall.id.find(inv.subject);
+    for (const a of approved) {
+      if (a.kind === 'structural_repair') {
+        for (const iss of [...ctx.db.issue.iter()]) if (iss.id === 'ISS-2' && iss.status === 'open') ctx.db.issue.id.update({ ...iss, status: 'scheduled' });
+      }
+      ctx.db.workOrder.insert({ id: `WO-${4600 + Number(ctx.db.workOrder.count())}`, assetId: a.target, title: a.title, status: 'scheduled', ageDays: 0, createdBy: 'cascade', cost: a.cost });
+      ctx.db.actionCandidate.id.update({ ...a, status: 'done' });
+    }
+    const removing = approved.some(a => ['install_beam', 'remove_partition'].includes(a.kind));
+    if (w && removing) ctx.db.wall.id.update({ ...w, proposalState: 'approved' });
+    ctx.db.agentStep.insert({ id: 0n, invId: inv.id, seq: Number(ctx.db.agentStep.count()) + 100, agent: 'structural', tool: 'execute_action', why: 'Scheduling the approved work',
+      result: `${approved.length} work orders · ${money(approved.reduce((s, a) => s + a.cost, 0))}${removing ? ' · wall change approved' : ''}`, target: '', status: 'done', model: '' });
+    ctx.db.investigation.id.update({ ...inv, status: 'resolved' });
+    return;
+  }
+
   const plan: Plan = { ...NO_PLAN };
   for (const a of approved) {
     if (a.kind === 'work_order') {
@@ -1892,6 +3325,11 @@ export const executeAction = spacetimedb.reducer(ctx => {
     } else if (a.kind === 'tenant_notice') {
       plan.notice = true;
       ctx.db.notice.insert({ id: 0n, tenantId: 'T-NW', text: `Northwind Analytics: planned chiller maintenance today ${clock(PLANNED_START)}–${clock(PLANNED_END)}. Your server room stays cooled by Chiller 1 throughout.` });
+    } else if (a.kind === 'structural_repair') {
+      for (const iss of [...ctx.db.issue.iter()]) if (iss.id === 'ISS-2' && iss.status === 'open') ctx.db.issue.id.update({ ...iss, status: 'scheduled' });
+      const mw = ctx.db.wall.id.find('W-MECH-E');
+      if (mw) ctx.db.wall.id.update({ ...mw, health: 'watch' });
+      ctx.db.workOrder.insert({ id: `WO-${4600 + Number(ctx.db.workOrder.count())}`, assetId: 'CH-2', title: 'Chiller 2 isolation pads + epoxy crack injection, Mechanical east wall', status: 'scheduled', ageDays: 0, createdBy: 'cascade', cost: a.cost });
     } else if (a.kind === 'portable_cooling') {
       plan.portable = true;
       ctx.db.workOrder.insert({ id: `WO-${4600 + Number(ctx.db.workOrder.count())}`, assetId: 'AHU-2', title: 'Deliver 15-ton portable cooling to Server Room 300', status: 'scheduled', ageDays: 0, createdBy: 'cascade', cost: a.cost });
@@ -1914,6 +3352,45 @@ export const executeAction = spacetimedb.reducer(ctx => {
   ctx.db.investigation.id.update({ ...inv, status: main.outageHour < 0 ? 'resolved' : 'awaiting_approval' });
   setTimeline(ctx, { label: 'with_plan' });
   emit(ctx, { kind: 'clear' });
+});
+
+// ================================================================ collaboration
+
+/** Row-level security: shared notes are visible to everyone, private notes only to their author. */
+export const sharedNotes = spacetimedb.clientVisibilityFilter.sql('SELECT * FROM field_note WHERE is_private = false');
+export const ownNotes = spacetimedb.clientVisibilityFilter.sql('SELECT * FROM field_note WHERE author = :sender');
+
+function placeOf(ctx: Ctx, targetId: string, u: { x: number; z: number }): { x: number; z: number; label: string } {
+  const a = ctx.db.asset.id.find(targetId);
+  if (a) return { x: a.x, z: a.z, label: a.name };
+  const r = ctx.db.room.id.find(targetId);
+  if (r) return { x: (r.x0 + r.x1) / 2, z: (r.z0 + r.z1) / 2, label: r.name };
+  const w = ctx.db.wall.id.find(targetId);
+  if (w) return { x: (w.x0 + w.x1) / 2, z: (w.z0 + w.z1) / 2, label: w.name };
+  const i = ctx.db.issue.id.find(targetId);
+  if (i) return { x: i.x, z: i.z, label: i.title };
+  return { x: u.x, z: u.z, label: 'here' };
+}
+
+/** "Look here": a beacon on every headset. kind: look | come */
+export const sendPing = spacetimedb.reducer({ targetId: t.string(), kind: t.string() }, (ctx, { targetId, kind }) => {
+  const u = me(ctx);
+  const p = placeOf(ctx, targetId, u);
+  ctx.db.ping.insert({ fromName: u.name, fromRole: u.role, targetId, x: p.x, z: p.z, kind: kind === 'come' ? 'come' : 'look', label: p.label });
+});
+
+/** A field note pinned to a place; the agents read shared notes as evidence. */
+export const addNote = spacetimedb.reducer({ targetId: t.string(), text: t.string(), isPrivate: t.bool() }, (ctx, { targetId, text, isPrivate }) => {
+  const u = me(ctx);
+  const body = text.trim().slice(0, 280);
+  if (!body) throw new SenderError('empty note');
+  const p = placeOf(ctx, targetId, u);
+  ctx.db.fieldNote.insert({ id: 0n, author: ctx.sender, authorName: u.name, role: u.role, targetId: targetId || '', x: p.x, z: p.z, text: body, isPrivate, at: ctx.timestamp });
+});
+
+export const deleteNote = spacetimedb.reducer({ id: t.u64() }, (ctx, { id }) => {
+  const n = ctx.db.fieldNote.id.find(id);
+  if (n && n.author.equals(ctx.sender)) ctx.db.fieldNote.id.delete(id);
 });
 
 export const resetDemo = spacetimedb.reducer(ctx => { resetAll(ctx); setTimeline(ctx, { built: false }); });

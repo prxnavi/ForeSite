@@ -33,16 +33,26 @@ namespace Cascade.Net
             AddTable(AiStatus = new(conn));
             AddTable(Answer = new(conn));
             AddTable(Asset = new(conn));
+            AddTable(BenchEcho = new(conn));
+            AddTable(Blueprint = new(conn));
             AddTable(Critique = new(conn));
             AddTable(Decision = new(conn));
             AddTable(Dependency = new(conn));
+            AddTable(Element = new(conn));
+            AddTable(ElementEdge = new(conn));
+            AddTable(EvalCase = new(conn));
+            AddTable(EvalResult = new(conn));
             AddTable(Evidence = new(conn));
+            AddTable(FieldNote = new(conn));
             AddTable(Hypothesis = new(conn));
             AddTable(HypothesisEvidence = new(conn));
             AddTable(Investigation = new(conn));
             AddTable(Issue = new(conn));
+            AddTable(LlmCall = new(conn));
+            AddTable(Metric = new(conn));
             AddTable(Notice = new(conn));
             AddTable(PastIncident = new(conn));
+            AddTable(Ping = new(conn));
             AddTable(Room = new(conn));
             AddTable(Scenario = new(conn));
             AddTable(SceneCommand = new(conn));
@@ -50,7 +60,9 @@ namespace Cascade.Net
             AddTable(Subtask = new(conn));
             AddTable(Tenant = new(conn));
             AddTable(Timeline = new(conn));
+            AddTable(ToolCall = new(conn));
             AddTable(User = new(conn));
+            AddTable(Wall = new(conn));
             AddTable(WorkOrder = new(conn));
         }
     }
@@ -539,16 +551,26 @@ namespace Cascade.Net
             new QueryBuilder().From.AiStatus().ToSql(),
             new QueryBuilder().From.Answer().ToSql(),
             new QueryBuilder().From.Asset().ToSql(),
+            new QueryBuilder().From.BenchEcho().ToSql(),
+            new QueryBuilder().From.Blueprint().ToSql(),
             new QueryBuilder().From.Critique().ToSql(),
             new QueryBuilder().From.Decision().ToSql(),
             new QueryBuilder().From.Dependency().ToSql(),
+            new QueryBuilder().From.Element().ToSql(),
+            new QueryBuilder().From.ElementEdge().ToSql(),
+            new QueryBuilder().From.EvalCase().ToSql(),
+            new QueryBuilder().From.EvalResult().ToSql(),
             new QueryBuilder().From.Evidence().ToSql(),
+            new QueryBuilder().From.FieldNote().ToSql(),
             new QueryBuilder().From.Hypothesis().ToSql(),
             new QueryBuilder().From.HypothesisEvidence().ToSql(),
             new QueryBuilder().From.Investigation().ToSql(),
             new QueryBuilder().From.Issue().ToSql(),
+            new QueryBuilder().From.LlmCall().ToSql(),
+            new QueryBuilder().From.Metric().ToSql(),
             new QueryBuilder().From.Notice().ToSql(),
             new QueryBuilder().From.PastIncident().ToSql(),
+            new QueryBuilder().From.Ping().ToSql(),
             new QueryBuilder().From.Room().ToSql(),
             new QueryBuilder().From.Scenario().ToSql(),
             new QueryBuilder().From.SceneCommand().ToSql(),
@@ -556,7 +578,9 @@ namespace Cascade.Net
             new QueryBuilder().From.Subtask().ToSql(),
             new QueryBuilder().From.Tenant().ToSql(),
             new QueryBuilder().From.Timeline().ToSql(),
+            new QueryBuilder().From.ToolCall().ToSql(),
             new QueryBuilder().From.User().ToSql(),
+            new QueryBuilder().From.Wall().ToSql(),
             new QueryBuilder().From.WorkOrder().ToSql(),
         }
         ;
@@ -569,16 +593,26 @@ namespace Cascade.Net
         public global::SpacetimeDB.Table<AiStatus, AiStatusCols, AiStatusIxCols> AiStatus() => new("ai_status", new AiStatusCols("ai_status"), new AiStatusIxCols("ai_status"));
         public global::SpacetimeDB.Table<Answer, AnswerCols, AnswerIxCols> Answer() => new("answer", new AnswerCols("answer"), new AnswerIxCols("answer"));
         public global::SpacetimeDB.Table<Asset, AssetCols, AssetIxCols> Asset() => new("asset", new AssetCols("asset"), new AssetIxCols("asset"));
+        public global::SpacetimeDB.Table<BenchEcho, BenchEchoCols, BenchEchoIxCols> BenchEcho() => new("bench_echo", new BenchEchoCols("bench_echo"), new BenchEchoIxCols("bench_echo"));
+        public global::SpacetimeDB.Table<Blueprint, BlueprintCols, BlueprintIxCols> Blueprint() => new("blueprint", new BlueprintCols("blueprint"), new BlueprintIxCols("blueprint"));
         public global::SpacetimeDB.Table<Critique, CritiqueCols, CritiqueIxCols> Critique() => new("critique", new CritiqueCols("critique"), new CritiqueIxCols("critique"));
         public global::SpacetimeDB.Table<Decision, DecisionCols, DecisionIxCols> Decision() => new("decision", new DecisionCols("decision"), new DecisionIxCols("decision"));
         public global::SpacetimeDB.Table<Dependency, DependencyCols, DependencyIxCols> Dependency() => new("dependency", new DependencyCols("dependency"), new DependencyIxCols("dependency"));
+        public global::SpacetimeDB.Table<Element, ElementCols, ElementIxCols> Element() => new("element", new ElementCols("element"), new ElementIxCols("element"));
+        public global::SpacetimeDB.Table<ElementEdge, ElementEdgeCols, ElementEdgeIxCols> ElementEdge() => new("element_edge", new ElementEdgeCols("element_edge"), new ElementEdgeIxCols("element_edge"));
+        public global::SpacetimeDB.Table<EvalCase, EvalCaseCols, EvalCaseIxCols> EvalCase() => new("eval_case", new EvalCaseCols("eval_case"), new EvalCaseIxCols("eval_case"));
+        public global::SpacetimeDB.Table<EvalResult, EvalResultCols, EvalResultIxCols> EvalResult() => new("eval_result", new EvalResultCols("eval_result"), new EvalResultIxCols("eval_result"));
         public global::SpacetimeDB.Table<Evidence, EvidenceCols, EvidenceIxCols> Evidence() => new("evidence", new EvidenceCols("evidence"), new EvidenceIxCols("evidence"));
+        public global::SpacetimeDB.Table<FieldNote, FieldNoteCols, FieldNoteIxCols> FieldNote() => new("field_note", new FieldNoteCols("field_note"), new FieldNoteIxCols("field_note"));
         public global::SpacetimeDB.Table<Hypothesis, HypothesisCols, HypothesisIxCols> Hypothesis() => new("hypothesis", new HypothesisCols("hypothesis"), new HypothesisIxCols("hypothesis"));
         public global::SpacetimeDB.Table<HypothesisEvidence, HypothesisEvidenceCols, HypothesisEvidenceIxCols> HypothesisEvidence() => new("hypothesis_evidence", new HypothesisEvidenceCols("hypothesis_evidence"), new HypothesisEvidenceIxCols("hypothesis_evidence"));
         public global::SpacetimeDB.Table<Investigation, InvestigationCols, InvestigationIxCols> Investigation() => new("investigation", new InvestigationCols("investigation"), new InvestigationIxCols("investigation"));
         public global::SpacetimeDB.Table<Issue, IssueCols, IssueIxCols> Issue() => new("issue", new IssueCols("issue"), new IssueIxCols("issue"));
+        public global::SpacetimeDB.Table<LlmCall, LlmCallCols, LlmCallIxCols> LlmCall() => new("llm_call", new LlmCallCols("llm_call"), new LlmCallIxCols("llm_call"));
+        public global::SpacetimeDB.Table<Metric, MetricCols, MetricIxCols> Metric() => new("metric", new MetricCols("metric"), new MetricIxCols("metric"));
         public global::SpacetimeDB.Table<Notice, NoticeCols, NoticeIxCols> Notice() => new("notice", new NoticeCols("notice"), new NoticeIxCols("notice"));
         public global::SpacetimeDB.Table<PastIncident, PastIncidentCols, PastIncidentIxCols> PastIncident() => new("past_incident", new PastIncidentCols("past_incident"), new PastIncidentIxCols("past_incident"));
+        public global::SpacetimeDB.Table<Ping, PingCols, PingIxCols> Ping() => new("ping", new PingCols("ping"), new PingIxCols("ping"));
         public global::SpacetimeDB.Table<Room, RoomCols, RoomIxCols> Room() => new("room", new RoomCols("room"), new RoomIxCols("room"));
         public global::SpacetimeDB.Table<Scenario, ScenarioCols, ScenarioIxCols> Scenario() => new("scenario", new ScenarioCols("scenario"), new ScenarioIxCols("scenario"));
         public global::SpacetimeDB.Table<SceneCommand, SceneCommandCols, SceneCommandIxCols> SceneCommand() => new("scene_command", new SceneCommandCols("scene_command"), new SceneCommandIxCols("scene_command"));
@@ -586,7 +620,9 @@ namespace Cascade.Net
         public global::SpacetimeDB.Table<Subtask, SubtaskCols, SubtaskIxCols> Subtask() => new("subtask", new SubtaskCols("subtask"), new SubtaskIxCols("subtask"));
         public global::SpacetimeDB.Table<Tenant, TenantCols, TenantIxCols> Tenant() => new("tenant", new TenantCols("tenant"), new TenantIxCols("tenant"));
         public global::SpacetimeDB.Table<Timeline, TimelineCols, TimelineIxCols> Timeline() => new("timeline", new TimelineCols("timeline"), new TimelineIxCols("timeline"));
+        public global::SpacetimeDB.Table<ToolCall, ToolCallCols, ToolCallIxCols> ToolCall() => new("tool_call", new ToolCallCols("tool_call"), new ToolCallIxCols("tool_call"));
         public global::SpacetimeDB.Table<User, UserCols, UserIxCols> User() => new("user", new UserCols("user"), new UserIxCols("user"));
+        public global::SpacetimeDB.Table<Wall, WallCols, WallIxCols> Wall() => new("wall", new WallCols("wall"), new WallIxCols("wall"));
         public global::SpacetimeDB.Table<WorkOrder, WorkOrderCols, WorkOrderIxCols> WorkOrder() => new("work_order", new WorkOrderCols("work_order"), new WorkOrderIxCols("work_order"));
     }
 
@@ -668,13 +704,21 @@ namespace Cascade.Net
         {
             var eventContext = (ReducerEventContext)context;
             return reducer switch {
+                Reducer.AddNote args => Reducers.InvokeAddNote(eventContext, args),
                 Reducer.ApproveAction args => Reducers.InvokeApproveAction(eventContext, args),
                 Reducer.Ask args => Reducers.InvokeAsk(eventContext, args),
+                Reducer.BenchPing args => Reducers.InvokeBenchPing(eventContext, args),
                 Reducer.BuildTwin args => Reducers.InvokeBuildTwin(eventContext, args),
+                Reducer.DeleteNote args => Reducers.InvokeDeleteNote(eventContext, args),
                 Reducer.ExecuteAction args => Reducers.InvokeExecuteAction(eventContext, args),
                 Reducer.Join args => Reducers.InvokeJoin(eventContext, args),
+                Reducer.ProposeWallChange args => Reducers.InvokeProposeWallChange(eventContext, args),
                 Reducer.RecheckNemotron args => Reducers.InvokeRecheckNemotron(eventContext, args),
+                Reducer.RecordMetric args => Reducers.InvokeRecordMetric(eventContext, args),
                 Reducer.ResetDemo args => Reducers.InvokeResetDemo(eventContext, args),
+                Reducer.RunAgentEval args => Reducers.InvokeRunAgentEval(eventContext, args),
+                Reducer.RunEval args => Reducers.InvokeRunEval(eventContext, args),
+                Reducer.SendPing args => Reducers.InvokeSendPing(eventContext, args),
                 Reducer.SendTech args => Reducers.InvokeSendTech(eventContext, args),
                 Reducer.SetModels args => Reducers.InvokeSetModels(eventContext, args),
                 Reducer.SetNvidiaKey args => Reducers.InvokeSetNvidiaKey(eventContext, args),

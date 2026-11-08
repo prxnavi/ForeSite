@@ -85,14 +85,14 @@ namespace CbreTwin
                 for (int x = 0; x < S; x++)
                 {
                     int xs = (x + offset[row]) % S;
-                    int plank = xs / (S / 3);
+                    int plank = Mathf.Min(2, xs / (S / 3));
                     float t = tone[row * 3 + plank];
                     // long grain lines along the plank with a little waviness
                     float grain = Mathf.PerlinNoise(xs * 0.012f + row * 3.1f, y * 0.35f + plank * 5f);
                     float rings = Mathf.Sin((y * 0.9f + Mathf.PerlinNoise(xs * 0.01f, row) * 18f) * 0.6f) * 0.5f + 0.5f;
                     float shade = 1f + t + (grain - 0.5f) * 0.16f + (rings - 0.5f) * 0.05f;
                     // seams between rows and plank ends
-                    bool seam = inRow < 0.025f || (xs % (S / 3)) < 2;
+                    bool seam = inRow < 0.025f || (xs % (S / 3)) < 2 || xs >= S - 2;
                     if (seam) shade *= 0.72f;
                     var c = baseC * shade;
                     c.a = 1;

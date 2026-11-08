@@ -208,16 +208,16 @@ namespace CbreTwin
                 foreach (var r in floorRooms)
                 {
                     delay += 0.025f;
-                    BuildSlab(lv, r, baseY);
+                    Safe(() => BuildSlab(lv, r, baseY), r.Name);
                     RoomCenter[r.Id] = W((float)(r.X + r.W / 2), baseY + 0.1f, (float)(r.Z + r.D / 2));
                 }
                 foreach (var r in floorRooms)
                 {
                     delay += 0.03f;
-                    BuildWalls(lv, r, floorRooms, baseY);
+                    Safe(() => BuildWalls(lv, r, floorRooms, baseY), r.Name);
                 }
                 if (!PlanMode)
-                    foreach (var r in floorRooms) BuildFurniture(lv, r, baseY);
+                    foreach (var r in floorRooms) Safe(() => BuildFurniture(lv, r, baseY), r.Name);
                 if (ShowRoof && !PlanMode)
                 {
                     foreach (var r in floorRooms.Where(r => r.Kind != "pool" && r.Kind != "deck" && r.Kind != "patio" && r.Ceiling > 0))
@@ -232,6 +232,13 @@ namespace CbreTwin
             BuildStartTime = Time.time;
             ApplyFloorVisibility();
             RefreshOverlays();
+        }
+
+        /// <summary>One room failing to build (bad data, a texture error) must never stop the rest of the house.</summary>
+        static void Safe(System.Action build, string what)
+        {
+            try { build(); }
+            catch (System.Exception e) { Debug.LogException(new System.Exception($"Keystone: couldn't build part of {what}", e)); }
         }
 
         static double Overlap(Room a, Room b)

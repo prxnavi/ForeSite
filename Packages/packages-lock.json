@@ -1,5 +1,12 @@
 {
   "dependencies": {
+    "com.clockworklabs.spacetimedbsdk": {
+      "version": "https://github.com/clockworklabs/com.clockworklabs.spacetimedbsdk.git#v2.14.1",
+      "depth": 0,
+      "source": "git",
+      "dependencies": {},
+      "hash": "854748cabf2cc2c3e48749b39aec36eccb2c131e"
+    },
     "com.coplaydev.unity-mcp": {
       "version": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity",
       "depth": 0,

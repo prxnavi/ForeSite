@@ -104,7 +104,30 @@ cd SpacetimeServer && NVIDIA_API_KEY=nvapi-XXXX spacetime publish cbre-twin-<tea
 
 1. Open the project in **Unity 6000.6.8f1**. Package Manager pulls `com.clockworklabs.spacetimedbsdk@v2.14.1` from git (`Packages/manifest.json`), so git must be on your PATH.
 2. Open `Assets/Scenes/SampleScene.unity` and press **Play**. Everything (camera, lighting, UI, connection) is created at runtime by `TwinBootstrap`.
-3. Enter your name, pick **Construction Manager** or **Real Estate Agent**, then click **Enter the digital twin**.
+3. The sign-in screen shows a live model turning behind the form. Enter your name, pick **Construction manager** or **Real estate agent**, then click **Continue**.
+
+### Walkthrough mode
+
+Choose **Walk through** in the top bar (or **Walk through from here** on any room) for a first-person, VR-style tour of the generated house:
+
+- You are at eye height (1.62 m) inside a collision capsule. Walls and glass block you, and doorways let you through.
+- A guided route visits every main room level by level along real doorways, with a short narration per room drawn from the twin's data. Rooms with critical findings are marked on the progress bar.
+- VR comfort features: 30° snap turns, fade-teleport to the floor under the reticle, and a vignette that narrows the view while you move.
+- Gaze inspection: look at a building system to see its live reading, and click to open its risk card or schedule a repair.
+- **Ask about this room** sends the current room to the Nemotron advisor, and the answer appears in the walkthrough.
+
+| Key | Action |
+|---|---|
+| W A S D (Shift to hurry) | Walk |
+| Mouse (click to capture, Esc to release) | Look |
+| Q / E | Snap turn 30° |
+| T | Teleport to where you're looking |
+| N / P | Next / previous room |
+| Space | Auto tour |
+| Click | Inspect what's under the reticle |
+| X | Leave the walkthrough |
+
+The walkthrough is a desktop rendition of VR interaction patterns. It does not drive a headset (no OpenXR package is installed).
 
 After you change the module schema, regenerate the bindings:
 
@@ -120,7 +143,7 @@ cd SpacetimeServer && spacetime generate --lang csharp --out-dir ../Assets/Scrip
 4. Click **Simulate time**. Months tick, a NOAA hail alert fires, sensors drift and the work order completes. The cascade probability, price and integrity scores update live.
 5. Open **Pricing & location** to see the price bridge and the same house in 6 markets.
 6. Open a second Unity instance (or a teammate's) on the same database. The teammate's avatar and pins appear in your walkthrough.
-7. Switch to Construction Manager on *Fields Modern Farmhouse*. Use **Walk** mode, the **Blueprint** view, and ask *“Sequence the next 90 days to avoid weather damage.”*
+7. Switch to Construction manager on *Fields Modern Farmhouse*. Open **Walk through**, press **Auto tour**, look at the dry-in and framing markers, and click **Ask about this room**.
 
 ## Project layout
 
@@ -137,7 +160,8 @@ Assets/Scripts/
   Twin/TwinBootstrap.cs   zero-setup runtime entry point
   Twin/TwinConnection.cs  SpacetimeDB connection + cache queries
   Twin/BlueprintBuilder.cs procedural 3D prototype + overlays
-  Twin/CameraRig.cs        orbit / walk / plan
+  Twin/CameraRig.cs        orbit / plan / immersive walkthrough
+  Twin/TourPlanner.cs      doorway-routed guided tour + narration
   Twin/PresenceSync.cs     multi-user presence
   Twin/TwinUI.cs           login, agent panel, analytics drawer
 Assets/Resources/UI/   Twin.uss (light theme), TwinTheme.tss

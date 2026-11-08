@@ -4,11 +4,13 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using SpacetimeDB.Types;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.UIElements;
+using Component = SpacetimeDB.Types.Component;
 
 namespace CbreTwin
 {
-    /// <summary>Runtime-built UI Toolkit interface: login → agent workspace over the 3D twin.</summary>
+    /// <summary>Runtime UI Toolkit interface: sign-in over a live model, workspace, immersive tour.</summary>
     public class TwinUI : MonoBehaviour
     {
         public static bool IsTyping;
@@ -19,29 +21,32 @@ namespace CbreTwin
         TwinConnection net;
 
         UIDocument doc;
-        VisualElement root, loginLayer, appLayer, overlay, markerLayer, labelLayer, popover;
-        Label loginStatus, liveLabel, simClock, agentModel, buildLabel, viewHint, toast;
-        VisualElement liveDot, avatars, bpList, kpiRow, hudTitleBox, buildFill, drawer, drawerContent, tabBar, chatBox, traceBox, agentBody, quickRow, thinking;
+        VisualElement root, loginLayer, appLayer, tourLayer;
+        VisualElement markerLayer, labelLayer, popover, hudBox, metricsRow, drawer, drawerContent, tabBar;
+        VisualElement propertyList, levelHost, avatars, viewSegHost, thread, steps, working, suggestions;
+        ScrollView threadScroll, stepsScroll;
+        Label loginStatus, loginCaption, crumb, simClock, buildLine, viewHint, advisorMode, toast;
         TextField nameField, companyField, serverField, dbField, promptField;
         Button simBtn;
-        ScrollView chatScroll, traceScroll;
+        VisualElement roleBuilder, roleBroker;
 
         string role = "real_estate_agent";
         uint selectedBp;
-        string drawerTab = "structural";
-        string agentTab = "chat";
+        string drawerTab = "structure";
+        bool showReasoning;
         bool drawerOpen = true;
         bool waitingForProfile;
         string pendingName;
         bool showLabels = true, showTeammates = true;
+        bool showcase;
         float nextRefresh, lastOverlayRefresh, toastUntil;
         int lastMessageCount = -1;
         ulong lastAlertSeen;
+        bool agentBusy;
         readonly List<(VisualElement el, uint id)> markerEls = new();
         readonly List<(VisualElement el, uint id)> roomLabels = new();
         readonly Dictionary<string, VisualElement> nameTags = new();
         readonly List<(VisualElement el, Vector3 pos)> pinEls = new();
-        bool agentBusy;
 
         public void Init(BlueprintBuilder b, CameraRig r, PresenceSync p)
         {
@@ -50,7 +55,7 @@ namespace CbreTwin
             presence = p;
         }
 
-        // ───────────── Setup ─────────────
+        // ───────────────────────── Setup ─────────────────────────
 
         void Start()
         {
@@ -63,7 +68,7 @@ namespace CbreTwin
             ps.match = 0.5f;
             ps.sortingOrder = 10;
 
-            var go = new GameObject("Twin UI");
+            var go = new GameObject("UI");
             go.SetActive(false);
             go.transform.SetParent(transform, false);
             doc = go.AddComponent<UIDocument>();
@@ -78,9 +83,11 @@ namespace CbreTwin
 
             BuildLogin();
             BuildApp();
+            BuildTour();
             appLayer.style.display = DisplayStyle.None;
+            tourLayer.style.display = DisplayStyle.None;
 
-            toast = new Label { name = "toast" };
+            toast = new Label();
             toast.AddToClassList("toast");
             toast.style.display = DisplayStyle.None;
             toast.pickingMode = PickingMode.Ignore;
@@ -88,20 +95,20 @@ namespace CbreTwin
 
             rig.IsOverUI = IsOverUI;
             rig.OnClick = HandleWorldClick;
+            rig.OnGuidedArrive = OnTourArrive;
+            rig.OnTeleportRequest = p => FadeThen(() => rig.Teleport(p));
+            rig.OnReticleSelect = OnReticleSelect;
+            rig.Cam.backgroundColor = Palette.Sky3D;
 
             net.OnStatus += s =>
             {
-                if (loginStatus != null)
-                {
-                    loginStatus.text = s;
-                    loginStatus.EnableInClassList("status-line--err", s.StartsWith("Could not") || s.Contains("error"));
-                }
-                if (liveLabel != null) liveLabel.text = s;
+                if (loginStatus == null) return;
+                loginStatus.text = s;
+                loginStatus.EnableInClassList("login-status--err", s.StartsWith("Could not") || s.Contains("error"));
             };
             net.OnReady += OnNetReady;
-            net.OnReducerError += msg => Toast("Error: " + msg);
+            net.OnReducerError += msg => Toast(msg);
 
-            // Auto-connect so the login page can show live status and restore the profile.
             net.Connect(net.ServerUrl, net.DbName);
         }
 
@@ -122,147 +129,114 @@ namespace CbreTwin
                 if (string.IsNullOrEmpty(companyField.value)) companyField.value = me.Company;
                 SetRole(me.Role);
             }
+            if (loginLayer.style.display == DisplayStyle.Flex && builder.BlueprintId == 0) StartShowcase();
             if (waitingForProfile && pendingName != null) Register();
         }
 
-        // ───────────── Login ─────────────
+        void StartShowcase()
+        {
+            var bp = net.Blueprint(4) ?? net.Blueprints().FirstOrDefault();
+            if (bp == null) return;
+            showcase = true;
+            builder.ShowSystems = false;
+            builder.ShowCascade = false;
+            builder.ShowStructural = false;
+            builder.PlanMode = false;
+            builder.Build(bp.Id);
+            rig.SetMode(ViewMode.Orbit, builder.WorldBounds);
+            var b = builder.WorldBounds;
+            rig.Frame(new Bounds(b.center + Vector3.left * b.extents.x * 0.35f, b.size * 0.9f));
+            rig.AutoRotate = true;
+            var loc = net.Location(bp.LocationId);
+            loginCaption.text = $"{bp.Name}\n{loc?.City}, {loc?.State}  ·  generated from plan data in the database";
+        }
 
-        VisualElement roleCm, roleAgent;
+        // ───────────────────────── Sign-in ─────────────────────────
 
         void BuildLogin()
         {
             loginLayer = new VisualElement();
             loginLayer.AddToClassList("fill");
-            loginLayer.style.backgroundImage = new StyleBackground(Gradient(new[] { Palette.Hex("#7B61FF"), Palette.Hex("#4DA3FF"), Palette.Hex("#2EC4B6"), Palette.Hex("#FF8FB1") }));
-            loginLayer.style.backgroundSize = new StyleBackgroundSize(new BackgroundSize(BackgroundSizeType.Cover));
-            loginLayer.style.flexDirection = FlexDirection.Row;
-            loginLayer.style.alignItems = Align.Center;
-            loginLayer.style.justifyContent = Justify.Center;
+            loginLayer.pickingMode = PickingMode.Ignore;
             root.Add(loginLayer);
 
-            // Hero
-            var hero = new VisualElement();
-            hero.style.width = 620; hero.style.marginRight = 70;
-            var kicker = new Label("HACKUTD 2026 · CBRE CHALLENGE");
-            kicker.style.color = new Color(1, 1, 1, 0.85f); kicker.style.unityFontStyleAndWeight = FontStyle.Bold; kicker.style.fontSize = 13; kicker.style.letterSpacing = 2;
-            hero.Add(kicker);
-            var title = new Label("Connect fragmented real-estate data.\nPredict failures before they spread.");
-            title.style.color = Color.white; title.style.fontSize = 40; title.style.unityFontStyleAndWeight = FontStyle.Bold; title.style.whiteSpace = WhiteSpace.Normal; title.style.marginTop = 10;
-            hero.Add(title);
-            var sub = new Label("A live digital twin that fuses blueprints, building-system ages, IoT telemetry, hazard maps and market comps inside SpacetimeDB — with a team of NVIDIA Nemotron agents that analyse, price and execute fixes.");
-            sub.style.color = new Color(1, 1, 1, 0.92f); sub.style.fontSize = 16; sub.style.whiteSpace = WhiteSpace.Normal; sub.style.marginTop = 14; sub.style.marginBottom = 22;
-            hero.Add(sub);
-            foreach (var (code, head, body, col) in new[]
-            {
-                ("01", "Predict cascading failures", "Weibull lifecycle + noisy-OR failure graph: gutters → foundation → plumbing → mold.", "#FFD166"),
-                ("02", "Quantify business impact", "Expected loss, price bridge, days-on-market and value unlocked — in every market.", "#FFFFFF"),
-                ("03", "Execute before disruptions spread", "Agents dispatch work orders transactionally; the twin recomputes instantly for everyone.", "#B8FFF4"),
-            })
-            {
-                var row = new VisualElement(); row.AddToClassList("row"); row.style.marginBottom = 12;
-                var badge = new Label(code);
-                badge.style.width = 40; badge.style.height = 40; badge.style.borderTopLeftRadius = badge.style.borderTopRightRadius = badge.style.borderBottomLeftRadius = badge.style.borderBottomRightRadius = 12;
-                badge.style.backgroundColor = new Color(1, 1, 1, 0.22f); badge.style.color = Palette.Hex(col); badge.style.unityTextAlign = TextAnchor.MiddleCenter; badge.style.unityFontStyleAndWeight = FontStyle.Bold; badge.style.marginRight = 12;
-                row.Add(badge);
-                var txt = new VisualElement();
-                var h = new Label(head); h.style.color = Color.white; h.style.unityFontStyleAndWeight = FontStyle.Bold; h.style.fontSize = 16;
-                var bLbl = new Label(body); bLbl.style.color = new Color(1, 1, 1, 0.85f); bLbl.style.whiteSpace = WhiteSpace.Normal; bLbl.style.fontSize = 13;
-                txt.Add(h); txt.Add(bLbl); txt.style.flexShrink = 1;
-                row.Add(txt);
-                hero.Add(row);
-            }
-            loginLayer.Add(hero);
+            var panel = new VisualElement(); panel.AddToClassList("login-panel");
+            var top = new VisualElement();
+            top.Add(L("KEYSTONE", "wordmark"));
+            top.Add(L("Property intelligence for builders and brokers", "wordmark-sub"));
+            top.Add(L("Sign in", "login-title"));
+            top.Add(L("Use your name and role. Your session is tied to this device.", "login-lede"));
 
-            // Card
-            var card = new VisualElement(); card.AddToClassList("login-card");
-            var brand = new VisualElement(); brand.AddToClassList("brand-row");
-            var logo = new Label("DT"); logo.AddToClassList("brand-logo");
-            brand.Add(logo);
-            var bt = new VisualElement();
-            var t1 = new Label("CBRE Digital Twin"); t1.AddToClassList("brand-title");
-            var t2 = new Label("Construction & Listing Intelligence"); t2.AddToClassList("brand-sub");
-            bt.Add(t1); bt.Add(t2); brand.Add(bt);
-            card.Add(brand);
-            var tag = new Label("Sign in to open the agent workspace. Your SpacetimeDB identity is created automatically and remembered on this device.");
-            tag.AddToClassList("login-tagline");
-            card.Add(tag);
-
-            card.Add(FieldLabel("YOUR NAME"));
-            nameField = Input("e.g. Jordan Lee");
-            card.Add(nameField);
-            card.Add(FieldLabel("COMPANY"));
-            companyField = Input("CBRE");
-            card.Add(companyField);
-            card.Add(FieldLabel("I AM A…"));
-            var roles = new VisualElement(); roles.AddToClassList("role-row");
-            roleCm = RoleCard("CM", "Construction Manager", "Generate blueprint prototypes, verify structural integrity, sequence construction risk.", "construction_manager");
-            roleAgent = RoleCard("RE", "Real Estate Agent", "Price the home in context, find what sells, fix issues before the inspection.", "real_estate_agent");
-            roleAgent.style.marginRight = 0;
-            roles.Add(roleCm); roles.Add(roleAgent);
-            card.Add(roles);
+            top.Add(L("Name", "field-label"));
+            nameField = Field("");
+            top.Add(nameField);
+            top.Add(L("Organization", "field-label"));
+            companyField = Field("");
+            top.Add(companyField);
+            top.Add(L("Role", "field-label"));
+            roleBuilder = RoleOption("Construction manager", "Structural review, sequencing and build risk.", "construction_manager");
+            roleBroker = RoleOption("Real estate agent", "Pricing, positioning and pre-listing repairs.", "real_estate_agent");
+            top.Add(roleBuilder);
+            top.Add(roleBroker);
             SetRole(role);
 
-            var adv = new VisualElement(); adv.style.display = DisplayStyle.None;
-            var advToggle = new Button(() => adv.style.display = adv.style.display == DisplayStyle.None ? DisplayStyle.Flex : DisplayStyle.None) { text = "Server settings +" };
-            advToggle.AddToClassList("btn"); advToggle.AddToClassList("btn-ghost"); advToggle.AddToClassList("advanced-toggle");
-            advToggle.style.alignSelf = Align.FlexStart;
-            card.Add(advToggle);
-            adv.Add(FieldLabel("SPACETIMEDB SERVER"));
-            serverField = Input("http://127.0.0.1:3000"); serverField.value = net != null ? net.ServerUrl : TwinConnection.DefaultServer;
-            adv.Add(serverField);
-            adv.Add(FieldLabel("DATABASE"));
-            dbField = Input("cbre-twin"); dbField.value = net != null ? net.DbName : TwinConnection.DefaultDb;
-            adv.Add(dbField);
-            var hint = new Label("Local: http://127.0.0.1:3000 · Maincloud: https://maincloud.spacetimedb.com");
-            hint.AddToClassList("tiny"); hint.AddToClassList("muted"); hint.style.marginTop = 4;
-            adv.Add(hint);
-            card.Add(adv);
-
-            var enter = new Button(OnEnterClicked) { text = "Enter the digital twin  →" };
-            enter.AddToClassList("btn"); enter.AddToClassList("btn-cta");
-            card.Add(enter);
+            top.Add(Btn("Continue", OnEnterClicked, "btn-solid btn-wide"));
             nameField.RegisterCallback<KeyDownEvent>(e => { if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter) OnEnterClicked(); }, TrickleDown.TrickleDown);
+            loginStatus = L("Connecting…", "login-status");
+            top.Add(loginStatus);
+            panel.Add(top);
 
-            loginStatus = new Label("Connecting…"); loginStatus.AddToClassList("status-line");
-            card.Add(loginStatus);
-            var foot = new VisualElement(); foot.AddToClassList("login-footer");
-            foreach (var (txt, cls) in new[] { ("SpacetimeDB 2.14 · reducers, procedures, schedules, views", "pill-violet"), ("NVIDIA Nemotron 3 Super agents", "pill-ok"), ("IRC 2021 · NAHB · NOAA · USDA · Zillow", "pill-info") })
-            {
-                var c = new Label(txt); c.AddToClassList("chip"); c.AddToClassList(cls); foot.Add(c);
-            }
-            card.Add(foot);
-            loginLayer.Add(card);
+            var bottom = new VisualElement();
+            var adv = new VisualElement { style = { display = DisplayStyle.None } };
+            var advBtn = Btn("Connection settings", () => adv.style.display = adv.style.display == DisplayStyle.None ? DisplayStyle.Flex : DisplayStyle.None, "btn-text");
+            advBtn.style.alignSelf = Align.FlexStart; advBtn.style.marginLeft = 0;
+            bottom.Add(advBtn);
+            adv.Add(L("Server", "field-label"));
+            serverField = Field("http://127.0.0.1:3000"); serverField.value = net != null ? net.ServerUrl : TwinConnection.DefaultServer;
+            adv.Add(serverField);
+            adv.Add(L("Database", "field-label"));
+            dbField = Field("cbre-twin"); dbField.value = net != null ? net.DbName : TwinConnection.DefaultDb;
+            adv.Add(dbField);
+            bottom.Add(adv);
+            panel.Add(bottom);
+            loginLayer.Add(panel);
+
+            loginCaption = L("", "login-caption");
+            loginCaption.pickingMode = PickingMode.Ignore;
+            loginLayer.Add(loginCaption);
         }
 
-        VisualElement RoleCard(string icon, string name, string desc, string key)
+        VisualElement RoleOption(string name, string desc, string key)
         {
-            var c = new VisualElement(); c.AddToClassList("role-card");
-            var i = new Label(icon); i.AddToClassList("role-icon");
-            i.style.color = key == "construction_manager" ? Palette.Coral : Palette.Indigo; i.style.unityFontStyleAndWeight = FontStyle.Bold;
-            var n = new Label(name); n.AddToClassList("role-name");
-            var d = new Label(desc); d.AddToClassList("role-desc");
-            c.Add(i); c.Add(n); c.Add(d);
-            c.RegisterCallback<ClickEvent>(_ => SetRole(key));
-            return c;
+            var o = new VisualElement(); o.AddToClassList("role-option");
+            var radio = new VisualElement(); radio.AddToClassList("radio");
+            var inner = new VisualElement(); inner.AddToClassList("radio-inner"); radio.Add(inner);
+            o.Add(radio);
+            var t = new VisualElement(); t.style.flexShrink = 1;
+            t.Add(L(name, "h3"));
+            t.Add(L(desc, "tiny"));
+            o.Add(t);
+            o.RegisterCallback<ClickEvent>(_ => SetRole(key));
+            return o;
         }
 
         void SetRole(string r)
         {
             role = r == "construction_manager" ? r : "real_estate_agent";
-            roleCm?.EnableInClassList("role-card--on", role == "construction_manager");
-            roleAgent?.EnableInClassList("role-card--on", role == "real_estate_agent");
+            roleBuilder?.EnableInClassList("role-option--on", role == "construction_manager");
+            roleBroker?.EnableInClassList("role-option--on", role == "real_estate_agent");
         }
 
         void OnEnterClicked()
         {
             var name = nameField.value?.Trim();
-            if (string.IsNullOrEmpty(name)) { loginStatus.text = "Please enter your name."; loginStatus.AddToClassList("status-line--err"); return; }
+            if (string.IsNullOrEmpty(name)) { loginStatus.text = "Enter your name to continue."; loginStatus.AddToClassList("login-status--err"); return; }
             pendingName = name;
             waitingForProfile = true;
             if (serverField.value.Trim() != net.ServerUrl || dbField.value.Trim() != net.DbName || !net.Ready)
             {
                 net.Connect(serverField.value, dbField.value);
-                return; // OnNetReady → Register
+                return;
             }
             Register();
         }
@@ -270,11 +244,11 @@ namespace CbreTwin
         void Register()
         {
             if (!net.Ready) return;
-            loginStatus.text = "Creating your session…";
-            net.Conn.Reducers.RegisterUser(pendingName, role, string.IsNullOrWhiteSpace(companyField.value) ? "CBRE" : companyField.value.Trim());
+            loginStatus.text = "Signing in…";
+            net.Conn.Reducers.RegisterUser(pendingName, role, string.IsNullOrWhiteSpace(companyField.value) ? "Independent" : companyField.value.Trim());
         }
 
-        // ───────────── App shell ─────────────
+        // ───────────────────────── Workspace ─────────────────────────
 
         void BuildApp()
         {
@@ -282,150 +256,141 @@ namespace CbreTwin
             appLayer.pickingMode = PickingMode.Ignore;
             root.Add(appLayer);
 
-            // Top bar
             var top = new VisualElement(); top.AddToClassList("topbar");
-            var logo = new Label("DT"); logo.AddToClassList("brand-logo"); top.Add(logo);
-            var tb = new VisualElement();
-            var tt = new Label("CBRE Digital Twin"); tt.AddToClassList("top-title");
-            var ts = new Label("SpacetimeDB live twin · NVIDIA Nemotron agent team"); ts.AddToClassList("top-sub");
-            tb.Add(tt); tb.Add(ts); top.Add(tb);
+            top.Add(L("KEYSTONE", "wordmark"));
+            crumb = L("", "crumb");
+            top.Add(crumb);
             top.Add(Spacer());
-            simBtn = Btn("Simulate time", () => net.Conn.Reducers.SetSimulation(!(net.Sim?.Running ?? false)), "btn-mint");
-            top.Add(simBtn);
-            top.Add(Btn("+6 months", () => { net.Conn.Reducers.StepSimulation(6); Toast("Fast-forwarding 6 months of wear, weather & sensor drift…"); }, null));
-            simClock = new Label("Month 0"); simClock.AddToClassList("sim-clock"); simClock.AddToClassList("small"); simClock.AddToClassList("bold");
+            viewSegHost = new VisualElement();
+            top.Add(viewSegHost);
+            top.Add(Spacer());
+            simClock = L("", "sim-label");
             top.Add(simClock);
-            top.Add(Btn("Reset demo", () => { net.Conn.Reducers.ResetDemo(); Toast("Demo data reset"); }, "btn-ghost"));
-            top.Add(Spacer());
-            liveDot = new VisualElement(); liveDot.AddToClassList("live-dot"); top.Add(liveDot);
-            liveLabel = new Label("Live"); liveLabel.AddToClassList("small"); liveLabel.AddToClassList("muted"); liveLabel.style.marginRight = 14;
-            top.Add(liveLabel);
-            avatars = new VisualElement(); avatars.AddToClassList("row"); avatars.style.marginRight = 14; top.Add(avatars);
-            top.Add(Btn("Sign out", SignOut, "btn-ghost"));
+            simBtn = Btn("Run simulation", () => net.Conn.Reducers.SetSimulation(!(net.Sim?.Running ?? false)), "btn-sm");
+            top.Add(simBtn);
+            top.Add(Btn("Advance 6 months", () => net.Conn.Reducers.StepSimulation(6), "btn-sm"));
+            top.Add(Btn("Reset", () => net.Conn.Reducers.ResetDemo(), "btn-text btn-sm"));
+            var sep = new VisualElement(); sep.style.width = 1; sep.style.height = 22; sep.style.backgroundColor = Palette.Line; sep.style.marginLeft = 14; sep.style.marginRight = 14;
+            top.Add(sep);
+            avatars = new VisualElement(); avatars.AddToClassList("row");
+            top.Add(avatars);
+            top.Add(Btn("Sign out", SignOut, "btn-text btn-sm"));
             appLayer.Add(top);
 
             var body = new VisualElement(); body.AddToClassList("body"); body.pickingMode = PickingMode.Ignore;
             appLayer.Add(body);
 
-            // Sidebar
             var side = new ScrollView(ScrollViewMode.Vertical); side.AddToClassList("sidebar");
-            side.Add(Section("EXAMPLE BLUEPRINTS"));
-            bpList = new VisualElement(); side.Add(bpList);
-            side.Add(Section("VIEW"));
-            side.Add(Segmented(new[] { "3D Orbit", "Walk", "Blueprint" }, 0, i => SetView((ViewMode)i)));
-            side.Add(Section("LEVELS"));
-            levelSeg = new VisualElement(); side.Add(levelSeg);
-            side.Add(Section("LAYERS"));
-            side.Add(LayerToggle("Structural heatmap", true, v => { builder.ShowStructural = v; builder.RefreshOverlays(); }));
-            side.Add(LayerToggle("Building systems", true, v => { builder.ShowSystems = v; builder.RefreshOverlays(); RebuildMarkers(); }));
-            side.Add(LayerToggle("Cascade predictions", true, v => { builder.ShowCascade = v; builder.RefreshOverlays(); }));
-            side.Add(LayerToggle("Room labels", true, v => { showLabels = v; RebuildMarkers(); }));
-            side.Add(LayerToggle("Teammates", true, v => showTeammates = v));
-            side.Add(LayerToggle("Roof", false, v => { builder.ShowRoof = v; RebuildScene(false); }));
-            side.Add(Section("LEGEND"));
-            var legend = new VisualElement(); legend.AddToClassList("row"); legend.style.flexWrap = Wrap.Wrap;
-            foreach (var (t, cls) in new[] { ("Sound", "pill-ok"), ("Watch", "pill-watch"), ("Critical", "pill-critical"), ("Low risk", "pill-info"), ("Severe risk", "pill-critical") })
-            { var c = new Label(t); c.AddToClassList("chip"); c.AddToClassList(cls); legend.Add(c); }
-            side.Add(legend);
+            var s1 = new VisualElement(); s1.AddToClassList("side-section-first");
+            s1.Add(Eyebrow("PROPERTIES", 10));
+            propertyList = new VisualElement(); s1.Add(propertyList);
+            side.Add(s1);
+            var s2 = new VisualElement(); s2.AddToClassList("side-section");
+            s2.Add(Eyebrow("LEVEL", 8));
+            levelHost = new VisualElement(); s2.Add(levelHost);
+            side.Add(s2);
+            var s3 = new VisualElement(); s3.AddToClassList("side-section");
+            s3.Add(Eyebrow("DISPLAY", 6));
+            s3.Add(Switch("Structural overlay", true, v => { builder.ShowStructural = v; builder.RefreshOverlays(); }));
+            s3.Add(Switch("Building systems", true, v => { builder.ShowSystems = v; builder.RefreshOverlays(); RebuildMarkers(); }));
+            s3.Add(Switch("Failure paths", true, v => { builder.ShowCascade = v; builder.RefreshOverlays(); }));
+            s3.Add(Switch("Room labels", true, v => { showLabels = v; RebuildMarkers(); }));
+            s3.Add(Switch("Teammates", true, v => showTeammates = v));
+            s3.Add(Switch("Roof", false, v => { builder.ShowRoof = v; RebuildScene(false); }));
+            side.Add(s3);
+            var s4 = new VisualElement(); s4.AddToClassList("side-section");
+            s4.Add(Eyebrow("KEY", 6));
+            foreach (var (t, cls) in new[] { ("Sound / low risk", "dot-ok"), ("Needs review", "dot-watch"), ("Critical", "dot-critical") })
+            {
+                var r = new VisualElement(); r.AddToClassList("row"); r.style.marginBottom = 4;
+                r.Add(Dot(cls)); r.Add(L(t, "small"));
+                s4.Add(r);
+            }
+            side.Add(s4);
             body.Add(side);
 
-            // Center
             var center = new VisualElement(); center.AddToClassList("center"); center.pickingMode = PickingMode.Ignore;
-            overlay = new VisualElement(); overlay.AddToClassList("viewport"); overlay.pickingMode = PickingMode.Ignore;
+            var overlay = new VisualElement(); overlay.AddToClassList("viewport"); overlay.pickingMode = PickingMode.Ignore;
             labelLayer = new VisualElement(); labelLayer.AddToClassList("fill"); labelLayer.pickingMode = PickingMode.Ignore;
             markerLayer = new VisualElement(); markerLayer.AddToClassList("fill"); markerLayer.pickingMode = PickingMode.Ignore;
-            overlay.Add(labelLayer); overlay.Add(markerLayer);
-
+            overlay.Add(labelLayer);
+            overlay.Add(markerLayer);
             var hud = new VisualElement(); hud.AddToClassList("hud"); hud.pickingMode = PickingMode.Ignore;
-            var hudCard = new VisualElement(); hudCard.AddToClassList("hud-card");
-            hudTitleBox = new VisualElement(); hudCard.Add(hudTitleBox);
-            buildLabel = new Label(""); buildLabel.AddToClassList("tiny"); buildLabel.AddToClassList("muted"); buildLabel.style.marginTop = 6;
-            hudCard.Add(buildLabel);
-            var bar = new VisualElement(); bar.AddToClassList("build-bar");
-            buildFill = new VisualElement(); buildFill.AddToClassList("build-fill"); bar.Add(buildFill);
-            hudCard.Add(bar);
-            hud.Add(hudCard);
-            kpiRow = new VisualElement(); kpiRow.AddToClassList("kpi-row"); hud.Add(kpiRow);
+            hudBox = new VisualElement(); hudBox.pickingMode = PickingMode.Ignore; hud.Add(hudBox);
+            metricsRow = new VisualElement(); metricsRow.AddToClassList("metrics"); hud.Add(metricsRow);
+            buildLine = L("", "build-line"); buildLine.pickingMode = PickingMode.Ignore; hud.Add(buildLine);
             overlay.Add(hud);
-            viewHint = new Label(""); viewHint.AddToClassList("viewhint"); viewHint.pickingMode = PickingMode.Ignore;
+            viewHint = L("", "viewhint"); viewHint.pickingMode = PickingMode.Ignore;
             overlay.Add(viewHint);
             popover = new VisualElement(); popover.AddToClassList("popover"); popover.style.display = DisplayStyle.None;
-            popover.style.right = 14; popover.style.top = 56;
             overlay.Add(popover);
             center.Add(overlay);
 
-            // Drawer
             drawer = new VisualElement(); drawer.AddToClassList("drawer");
-            tabBar = new VisualElement(); tabBar.AddToClassList("tabs");
-            drawer.Add(tabBar);
-            drawerContent = new VisualElement(); drawerContent.AddToClassList("drawer-content");
-            drawer.Add(drawerContent);
+            tabBar = new VisualElement(); tabBar.AddToClassList("tabs"); drawer.Add(tabBar);
+            drawerContent = new VisualElement(); drawerContent.AddToClassList("drawer-content"); drawer.Add(drawerContent);
             center.Add(drawer);
             body.Add(center);
 
-            // Agent panel
-            var agent = new VisualElement(); agent.AddToClassList("agentbar");
-            var head = new VisualElement(); head.AddToClassList("agent-head");
-            var hr = new VisualElement(); hr.AddToClassList("row");
-            var orb = new Label("N"); orb.AddToClassList("agent-orb"); hr.Add(orb);
-            var ht = new VisualElement(); ht.style.flexGrow = 1;
-            var h1 = new Label("Nemotron Agent Team"); h1.AddToClassList("h3");
-            agentModel = new Label("Orchestrator + 3 specialists"); agentModel.AddToClassList("tiny"); agentModel.AddToClassList("muted");
-            ht.Add(h1); ht.Add(agentModel); hr.Add(ht);
-            head.Add(hr);
-            var crew = new VisualElement(); crew.AddToClassList("row"); crew.style.flexWrap = Wrap.Wrap; crew.style.marginTop = 8;
-            foreach (var (n, k) in new[] { ("Orchestrator", "orchestrator"), ("Structural", "structural"), ("Operations", "operations"), ("Market", "market") })
-            {
-                var c = new Label(n); c.AddToClassList("chip"); c.style.backgroundColor = Palette.Agent(k); c.style.color = Color.white; crew.Add(c);
-            }
-            head.Add(crew);
-            var at = new VisualElement(); at.AddToClassList("seg"); at.style.marginTop = 6;
-            head.Add(Segmented(new[] { "Conversation", "Agent trace (live)" }, 0, i => { agentTab = i == 0 ? "chat" : "trace"; RefreshAgent(); }));
-            agent.Add(head);
+            var adv = new VisualElement(); adv.AddToClassList("agentbar");
+            var head = new VisualElement(); head.AddToClassList("advisor-head");
+            head.Add(Eyebrow("ADVISOR", 6));
+            head.Add(L("Ask about this property", "h2"));
+            advisorMode = L("Nemotron orchestrator with structural, operations and market agents", "tiny");
+            advisorMode.style.marginTop = 3; advisorMode.style.marginBottom = 12;
+            head.Add(advisorMode);
+            head.Add(Segmented(new[] { "Conversation", "Reasoning" }, 0, i => { showReasoning = i == 1; RefreshAdvisor(); }));
+            adv.Add(head);
 
-            agentBody = new VisualElement(); agentBody.style.flexGrow = 1;
-            chatScroll = new ScrollView(ScrollViewMode.Vertical); chatScroll.AddToClassList("chat"); chatScroll.style.flexGrow = 1;
-            chatBox = chatScroll.contentContainer;
-            traceScroll = new ScrollView(ScrollViewMode.Vertical); traceScroll.AddToClassList("chat"); traceScroll.style.flexGrow = 1;
-            traceBox = traceScroll.contentContainer;
-            agentBody.Add(chatScroll); agentBody.Add(traceScroll);
-            agent.Add(agentBody);
-            thinking = new VisualElement(); thinking.AddToClassList("thinking"); thinking.style.marginLeft = 12; thinking.style.marginRight = 12; thinking.style.display = DisplayStyle.None;
-            agent.Add(thinking);
-            quickRow = new VisualElement(); quickRow.AddToClassList("quick"); agent.Add(quickRow);
+            var advBody = new VisualElement(); advBody.AddToClassList("advisor-body");
+            threadScroll = new ScrollView(ScrollViewMode.Vertical); threadScroll.AddToClassList("thread");
+            thread = threadScroll.contentContainer;
+            stepsScroll = new ScrollView(ScrollViewMode.Vertical); stepsScroll.AddToClassList("thread");
+            steps = stepsScroll.contentContainer;
+            advBody.Add(threadScroll);
+            advBody.Add(stepsScroll);
+            adv.Add(advBody);
+            working = new VisualElement(); working.AddToClassList("working"); working.style.display = DisplayStyle.None;
+            adv.Add(working);
+            suggestions = new VisualElement(); suggestions.AddToClassList("suggestions");
+            adv.Add(suggestions);
             var comp = new VisualElement(); comp.AddToClassList("composer");
-            promptField = Input("Ask the agents… e.g. “What fails first and what will it cost?”");
+            promptField = Field("Ask a question");
             promptField.RegisterCallback<KeyDownEvent>(e => { if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter) { Ask(promptField.value); e.StopPropagation(); } }, TrickleDown.TrickleDown);
             comp.Add(promptField);
-            comp.Add(Btn("Send", () => Ask(promptField.value), "btn-primary"));
-            agent.Add(comp);
-            body.Add(agent);
+            comp.Add(Btn("Send", () => Ask(promptField.value), "btn-solid"));
+            adv.Add(comp);
+            body.Add(adv);
         }
 
-        VisualElement levelSeg;
-
-        // ───────────── Enter / select ─────────────
+        // ───────────────────────── Enter / select ─────────────────────────
 
         void EnterApp()
         {
             waitingForProfile = false;
+            showcase = false;
+            rig.AutoRotate = false;
+            builder.ShowSystems = builder.ShowCascade = builder.ShowStructural = true;
             loginLayer.style.display = DisplayStyle.None;
             appLayer.style.display = DisplayStyle.Flex;
             var me = net.Me;
             role = me?.Role ?? role;
-            RebuildBlueprintList();
+            RebuildViewSeg();
+            RebuildProperties();
             uint start = me != null && me.SelectedBlueprint != 0 ? me.SelectedBlueprint : (role == "construction_manager" ? 4u : 1u);
             SelectBlueprint(start);
-            BuildQuickPrompts();
-            Toast($"Welcome, {me?.Name} — you're live on SpacetimeDB");
+            BuildSuggestions();
         }
 
         void SignOut()
         {
+            if (rig.Mode == ViewMode.Tour) ExitTour();
             appLayer.style.display = DisplayStyle.None;
             loginLayer.style.display = DisplayStyle.Flex;
-            builder.Clear();
             selectedBp = 0;
+            RebuildMarkers();
+            builder.Clear();
+            StartShowcase();
             loginStatus.text = net.Status;
         }
 
@@ -439,8 +404,9 @@ namespace CbreTwin
             builder.SelectedComponent = 0;
             popover.style.display = DisplayStyle.None;
             RebuildScene(true);
-            RebuildBlueprintList();
+            RebuildProperties();
             RebuildLevels();
+            RebuildViewSeg();
             lastMessageCount = -1;
             RefreshAll();
         }
@@ -448,91 +414,89 @@ namespace CbreTwin
         void RebuildScene(bool reframe)
         {
             builder.Build(selectedBp);
-            if (reframe || rig.Mode == ViewMode.Plan) rig.SetMode(rig.Mode, builder.WorldBounds, 0);
-            var cam = rig.Cam;
-            cam.backgroundColor = builder.PlanMode ? Palette.BlueprintBg : Palette.Sky3D;
+            if (reframe || rig.Mode == ViewMode.Plan) rig.SetMode(rig.Mode == ViewMode.Tour ? ViewMode.Orbit : rig.Mode, builder.WorldBounds);
+            rig.Cam.backgroundColor = builder.PlanMode ? Palette.PlanPaper : Palette.Sky3D;
             RebuildMarkers();
         }
 
-        void SetView(ViewMode m)
+        void RebuildViewSeg()
         {
-            bool plan = m == ViewMode.Plan;
-            if (builder.PlanMode != plan) { builder.PlanMode = plan; RebuildScene(false); }
-            int floor = Mathf.Min(builder.MaxFloor, builder.FloorCount - 1);
-            rig.SetMode(m, builder.WorldBounds, builder.LevelBaseFt(Mathf.Max(0, floor == 98 ? 0 : floor)) * BlueprintBuilder.FT);
-            if (m == ViewMode.Walk && builder.MaxFloor >= builder.FloorCount) { builder.MaxFloor = 0; builder.ApplyFloorVisibility(); builder.RefreshOverlays(); RebuildMarkers(); RebuildLevels(); }
-            RefreshHint();
+            viewSegHost.Clear();
+            int on = rig.Mode == ViewMode.Plan ? 1 : 0;
+            viewSegHost.Add(Segmented(new[] { "Model", "Plan", "Walk through" }, on, i =>
+            {
+                if (i == 2) { EnterTour(); return; }
+                var m = i == 1 ? ViewMode.Plan : ViewMode.Orbit;
+                bool plan = m == ViewMode.Plan;
+                if (builder.PlanMode != plan) { builder.PlanMode = plan; RebuildScene(false); }
+                rig.SetMode(m, builder.WorldBounds);
+                RefreshHint();
+            }));
         }
 
         void RefreshHint()
         {
-            viewHint.text = rig.Mode switch
-            {
-                ViewMode.Walk => "WALK · WASD move · Shift run · drag to look · pick a level to change floors",
-                ViewMode.Plan => "BLUEPRINT · drag to pan · scroll to zoom · click a room",
-                _ => "ORBIT · drag to rotate · right-drag/Q/E · middle-drag pan · scroll zoom · click rooms & systems",
-            };
+            viewHint.text = rig.Mode == ViewMode.Plan
+                ? "Drag to pan  ·  scroll to zoom  ·  click a room"
+                : "Drag to orbit  ·  middle-drag to pan  ·  scroll to zoom  ·  click rooms and systems";
         }
 
         void RebuildLevels()
         {
-            levelSeg.Clear();
+            levelHost.Clear();
             var names = new List<string> { "All" };
-            for (int i = 0; i < builder.FloorCount; i++) names.Add($"L{i + 1}");
+            for (int i = 0; i < builder.FloorCount; i++) names.Add($"{i + 1}");
             int on = builder.MaxFloor >= builder.FloorCount ? 0 : builder.MaxFloor + 1;
-            levelSeg.Add(Segmented(names.ToArray(), on, i =>
+            levelHost.Add(Segmented(names.ToArray(), on, i =>
             {
                 builder.MaxFloor = i == 0 ? 99 : i - 1;
                 builder.ApplyFloorVisibility();
                 builder.RefreshOverlays();
                 RebuildMarkers();
-                if (rig.Mode == ViewMode.Walk) rig.SetWalkFloor(builder.LevelBaseFt(Mathf.Max(0, i - 1)) * BlueprintBuilder.FT);
             }));
         }
 
-        void RebuildBlueprintList()
+        void RebuildProperties()
         {
-            bpList.Clear();
+            propertyList.Clear();
             foreach (var b in net.Blueprints())
             {
                 var loc = net.Location(b.LocationId);
-                var card = new VisualElement(); card.AddToClassList("bp-card");
-                card.EnableInClassList("bp-card--on", b.Id == selectedBp);
-                var stripe = new VisualElement(); stripe.AddToClassList("bp-stripe"); stripe.style.backgroundColor = Palette.Hex(b.AccentColor);
-                card.Add(stripe);
-                var bb = new VisualElement(); bb.AddToClassList("bp-body");
-                var n = new Label(b.Name); n.AddToClassList("bp-name"); bb.Add(n);
-                var tg = new Label(b.Tagline); tg.AddToClassList("bp-tag"); bb.Add(tg);
-                var stats = new VisualElement(); stats.AddToClassList("bp-stats");
-                stats.Add(Chip($"{b.Sqft:#,0} sf", null));
-                stats.Add(Chip($"{b.Beds} bd / {b.Baths:0.#} ba", null));
-                stats.Add(Chip(b.Stage == "existing" ? $"Built {b.YearBuilt}" : "Under construction", b.Stage == "existing" ? "pill-info" : "pill-watch"));
-                if (loc != null) stats.Add(Chip(loc.City, "pill-violet"));
-                bb.Add(stats);
-                card.Add(bb);
+                var s = net.Summary(b.Id);
+                var item = new VisualElement(); item.AddToClassList("property");
+                item.EnableInClassList("property--on", b.Id == selectedBp);
+                var r = new VisualElement(); r.AddToClassList("row");
+                r.Add(Dot(s == null ? "dot-muted" : s.CriticalCount > 0 ? "dot-critical" : s.WatchCount > 2 ? "dot-watch" : "dot-ok"));
+                r.Add(L(b.Name, "property-name"));
+                item.Add(r);
+                var meta = $"{loc?.City}, {loc?.State}  ·  {(b.Stage == "existing" ? b.YearBuilt.ToString() : "In construction")}  ·  {b.Sqft:#,0} sq ft";
+                var m = L(meta, "property-meta"); m.style.marginLeft = 15;
+                item.Add(m);
                 var id = b.Id;
-                card.RegisterCallback<ClickEvent>(_ => SelectBlueprint(id));
-                bpList.Add(card);
+                item.RegisterCallback<ClickEvent>(_ => SelectBlueprint(id));
+                propertyList.Add(item);
             }
         }
 
-        // ───────────── Update loop ─────────────
+        // ───────────────────────── Update loop ─────────────────────────
 
         void Update()
         {
-            if (net == null) return;
+            if (net == null || toast == null) return;
             if (waitingForProfile && net.Ready)
             {
                 var me = net.Me;
                 if (me != null && me.Name == pendingName && me.Role == role) EnterApp();
             }
-            if (toast != null && toast.style.display == DisplayStyle.Flex && Time.unscaledTime > toastUntil) toast.style.display = DisplayStyle.None;
-            if (appLayer.style.display == DisplayStyle.None || selectedBp == 0) return;
+            if (toast.style.display == DisplayStyle.Flex && Time.unscaledTime > toastUntil) toast.style.display = DisplayStyle.None;
+            UpdateFade();
+            if (rig.Mode == ViewMode.Tour) UpdateTour();
+            if (selectedBp == 0 || (appLayer.style.display == DisplayStyle.None && rig.Mode != ViewMode.Tour)) return;
 
-            // Build progress HUD
             float prog = Mathf.Clamp01((Time.time - builder.BuildStartTime) / Mathf.Max(0.1f, builder.BuildDuration));
-            buildFill.style.width = Length.Percent(prog * 100);
-            buildLabel.text = prog < 1 ? $"Generating 3D prototype from blueprint rows… {prog * 100:0}%" : $"Prototype ready · {builder.RoomsById.Count} rooms · {builder.FloorCount} level(s) · {builder.ComponentWorld.Count} monitored systems";
+            buildLine.text = prog < 1
+                ? $"Assembling model from plan data  {prog * 100:0}%"
+                : $"{builder.RoomsById.Count} rooms  ·  {builder.FloorCount} level{(builder.FloorCount > 1 ? "s" : "")}  ·  {builder.ComponentWorld.Count} monitored systems";
 
             if (Time.unscaledTime < nextRefresh) return;
             nextRefresh = Time.unscaledTime + 0.25f;
@@ -540,7 +504,7 @@ namespace CbreTwin
             if (d == Dirty.None) return;
             net.DirtyFlags = Dirty.None;
 
-            if ((d & (Dirty.Risk | Dirty.Structural)) != 0)
+            if ((d & (Dirty.Risk | Dirty.Structural)) != 0 && rig.Mode != ViewMode.Tour)
             {
                 if (Time.unscaledTime - lastOverlayRefresh > 0.8f)
                 {
@@ -548,24 +512,24 @@ namespace CbreTwin
                     builder.RefreshOverlays();
                     RebuildMarkers();
                 }
-                else net.DirtyFlags |= d & (Dirty.Risk | Dirty.Structural); // retry next tick
+                else net.DirtyFlags |= d & (Dirty.Risk | Dirty.Structural);
             }
-            if ((d & Dirty.Geometry) != 0) RebuildBlueprintList();
-            if ((d & (Dirty.Risk | Dirty.Structural | Dirty.Market)) != 0) RefreshKpis();
+            if ((d & (Dirty.Geometry | Dirty.Structural)) != 0) RebuildProperties();
+            if ((d & (Dirty.Risk | Dirty.Structural | Dirty.Market)) != 0) RefreshHud();
             if ((d & (Dirty.Risk | Dirty.Structural | Dirty.Market | Dirty.Ops)) != 0) RefreshDrawer();
-            if ((d & Dirty.Agent) != 0) RefreshAgent();
+            if ((d & Dirty.Agent) != 0) { RefreshAdvisor(); RefreshTourAdvisor(); }
             if ((d & Dirty.Users) != 0) RefreshAvatars();
             if ((d & Dirty.Sim) != 0) RefreshSim();
             if ((d & Dirty.Annotations) != 0) RebuildMarkers();
             if ((d & Dirty.Ops) != 0) CheckAlerts();
-            if (builder.SelectedComponent != 0 && (d & Dirty.Risk) != 0) ShowComponentPopover(builder.SelectedComponent);
+            if (builder.SelectedComponent != 0 && (d & Dirty.Risk) != 0 && popover.style.display == DisplayStyle.Flex) ShowComponentPopover(builder.SelectedComponent);
         }
 
         void RefreshAll()
         {
-            RefreshKpis();
+            RefreshHud();
             RefreshDrawer();
-            RefreshAgent();
+            RefreshAdvisor();
             RefreshAvatars();
             RefreshSim();
             RefreshHint();
@@ -577,83 +541,75 @@ namespace CbreTwin
             var a = net.Alerts(selectedBp).FirstOrDefault();
             if (a == null || a.Id <= lastAlertSeen) return;
             lastAlertSeen = a.Id;
-            if (a.Level != "info") Toast((a.Level == "critical" ? "CRITICAL · " : "Alert · ") + a.Message);
+            if (a.Level != "info") Toast(a.Message);
         }
 
         void RefreshSim()
         {
             var s = net.Sim;
             if (s == null) return;
-            simBtn.text = s.Running ? "Pause simulation" : "Simulate time";
-            simBtn.EnableInClassList("btn-coral", s.Running);
-            simBtn.EnableInClassList("btn-mint", !s.Running);
+            simBtn.text = s.Running ? "Pause simulation" : "Run simulation";
             double y = s.BaseYear + s.SimMonths / 12.0;
-            int month = (int)((y % 1) * 12);
-            var names = new[] { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-            simClock.text = $"{names[Mathf.Clamp(month, 0, 11)]} {(int)y} · +{s.SimMonths} mo";
+            int month = Mathf.Clamp((int)((y % 1) * 12), 0, 11);
+            var names = new[] { "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+            simClock.text = s.SimMonths == 0 ? "Today" : $"{names[month]} {(int)y}  (+{s.SimMonths} mo)";
         }
 
         void RefreshAvatars()
         {
             avatars.Clear();
-            foreach (var u in net.OnlineUsers().Take(6))
+            foreach (var u in net.OnlineUsers().Take(5))
             {
-                var a = new Label(Initials(u.Name)); a.AddToClassList("avatar"); a.style.backgroundColor = Palette.Hex(u.Color);
+                var a = L(Initials(u.Name), "avatar");
+                a.style.backgroundColor = Palette.Hex(u.Color);
                 a.tooltip = $"{u.Name} · {RoleName(u.Role)}";
                 avatars.Add(a);
             }
             var me = net.Me;
             if (me != null)
             {
-                var who = new Label($"  {me.Name} · {RoleName(me.Role)}"); who.AddToClassList("small"); who.AddToClassList("bold");
+                var who = L(me.Name, "small"); who.style.marginLeft = 10; who.style.color = Palette.Ink;
                 avatars.Add(who);
             }
-            liveDot.EnableInClassList("live-dot--off", !net.Ready);
         }
 
-        // ───────────── KPIs / HUD ─────────────
-
-        void RefreshKpis()
+        void RefreshHud()
         {
             var b = net.Blueprint(selectedBp);
             if (b == null) return;
             var loc = net.Location(b.LocationId);
-            hudTitleBox.Clear();
-            var r = new VisualElement(); r.AddToClassList("row");
-            var dot = new VisualElement(); dot.style.width = 12; dot.style.height = 12; dot.style.borderTopLeftRadius = dot.style.borderTopRightRadius = dot.style.borderBottomLeftRadius = dot.style.borderBottomRightRadius = 6; dot.style.backgroundColor = Palette.Hex(b.AccentColor); dot.style.marginRight = 8;
-            r.Add(dot);
-            var n = new Label(b.Name); n.AddToClassList("h2"); r.Add(n);
-            hudTitleBox.Add(r);
-            var sub = new Label($"{b.Style} · {loc?.Name} · {b.Foundation}"); sub.AddToClassList("small"); sub.AddToClassList("muted");
-            hudTitleBox.Add(sub);
+            crumb.text = $"Portfolio   /   {b.Name}";
+            hudBox.Clear();
+            hudBox.Add(L(b.Name, "hud-title"));
+            hudBox.Add(L($"{b.Style}  ·  {loc?.City}, {loc?.State}  ·  {b.Beds} bed, {b.Baths:0.#} bath  ·  {b.Sqft:#,0} sq ft", "hud-sub"));
 
-            kpiRow.Clear();
+            metricsRow.Clear();
             var s = net.Summary(selectedBp);
             var v = net.Valuation(selectedBp);
-            if (s != null) kpiRow.Add(Kpi("STRUCTURAL INTEGRITY", $"{s.IntegrityScore:0}/100", s.IntegrityScore >= 80 ? Palette.Ok : s.IntegrityScore >= 55 ? Palette.Watch : Palette.Critical));
+            var items = new List<(string, string)>();
+            if (s != null) items.Add(("STRUCTURE", $"{s.IntegrityScore:0} / 100"));
             if (v != null)
             {
-                kpiRow.Add(Kpi("12-MO CASCADE RISK", Palette.Money(v.ExpectedLoss12Mo), Palette.Pink));
-                kpiRow.Add(Kpi(b.Stage == "existing" ? "RECOMMENDED LIST" : "PROJECTED VALUE", Palette.Money(v.ListPrice), Palette.Indigo));
-                kpiRow.Add(Kpi("DAYS ON MARKET", $"{v.DaysOnMarket:0}", Palette.Mint));
+                items.Add(("12-MONTH RISK", Palette.Money(v.ExpectedLoss12Mo)));
+                items.Add((b.Stage == "existing" ? "LIST PRICE" : "VALUE AT COMPLETION", Palette.Money(v.ListPrice)));
+                items.Add(("DAYS ON MARKET", $"{v.DaysOnMarket:0}"));
+            }
+            for (int i = 0; i < items.Count; i++)
+            {
+                var m = new VisualElement(); m.AddToClassList("metric");
+                if (i == items.Count - 1) m.AddToClassList("metric-last");
+                m.Add(L(items[i].Item1, "eyebrow"));
+                m.Add(L(items[i].Item2, "metric-value"));
+                metricsRow.Add(m);
             }
         }
 
-        VisualElement Kpi(string label, string value, Color c)
-        {
-            var k = new VisualElement(); k.AddToClassList("kpi");
-            var l = new Label(label); l.AddToClassList("kpi-label");
-            var v = new Label(value); v.AddToClassList("kpi-value"); v.style.color = c;
-            k.Add(l); k.Add(v);
-            return k;
-        }
-
-        // ───────────── Drawer ─────────────
+        // ───────────────────────── Drawer ─────────────────────────
 
         static readonly (string key, string title)[] Tabs =
         {
-            ("structural", "Structural integrity"), ("forecast", "Failure forecast"), ("pricing", "Pricing & location"),
-            ("features", "Selling points & ROI"), ("execute", "Execute · work orders"), ("sources", "Data & research"),
+            ("structure", "Structure"), ("systems", "Systems"), ("valuation", "Valuation"),
+            ("fit", "Market fit"), ("orders", "Work orders"), ("sources", "Sources"),
         };
 
         void RefreshDrawer()
@@ -668,21 +624,20 @@ namespace CbreTwin
                 tabBar.Add(t);
             }
             tabBar.Add(Spacer());
-            tabBar.Add(Btn(drawerOpen ? "Collapse" : "Expand", () => { drawerOpen = !drawerOpen; RefreshDrawer(); }, "btn-ghost"));
+            tabBar.Add(Btn(drawerOpen ? "Hide" : "Show", () => { drawerOpen = !drawerOpen; RefreshDrawer(); }, "btn-text btn-sm"));
             drawer.EnableInClassList("drawer--collapsed", !drawerOpen);
 
-            // Preserve scroll positions across live refreshes
             var offsets = drawerContent.Query<ScrollView>().ToList().Select(sv => sv.scrollOffset).ToList();
             drawerContent.Clear();
             drawerContent.style.display = drawerOpen ? DisplayStyle.Flex : DisplayStyle.None;
             if (!drawerOpen) return;
             switch (drawerTab)
             {
-                case "structural": DrawStructural(); break;
-                case "forecast": DrawForecast(); break;
-                case "pricing": DrawPricing(); break;
-                case "features": DrawFeatures(); break;
-                case "execute": DrawExecute(); break;
+                case "structure": DrawStructure(); break;
+                case "systems": DrawSystems(); break;
+                case "valuation": DrawValuation(); break;
+                case "fit": DrawFit(); break;
+                case "orders": DrawOrders(); break;
                 default: DrawSources(); break;
             }
             var svs = drawerContent.Query<ScrollView>().ToList();
@@ -692,318 +647,283 @@ namespace CbreTwin
             }).ExecuteLater(1);
         }
 
-        VisualElement HRow()
+        VisualElement Column(float width, bool last = false)
         {
-            var r = new VisualElement(); r.style.flexDirection = FlexDirection.Row; r.style.flexGrow = 1; r.style.alignItems = Align.Stretch;
-            drawerContent.Add(r);
-            return r;
-        }
-
-        ScrollView ListCard(VisualElement parent, string title, float grow, string tint = null)
-        {
-            var c = new VisualElement(); c.AddToClassList("card"); if (tint != null) c.AddToClassList(tint);
-            c.style.flexGrow = grow; c.style.flexBasis = 0;
-            var h = new Label(title); h.AddToClassList("h3"); h.style.marginBottom = 6; c.Add(h);
-            var sv = new ScrollView(ScrollViewMode.Vertical); sv.style.flexGrow = 1;
-            c.Add(sv);
-            parent.Add(c);
-            return sv;
-        }
-
-        VisualElement FixedCard(VisualElement parent, float width, string tint = null)
-        {
-            var c = new VisualElement(); c.AddToClassList("card"); if (tint != null) c.AddToClassList(tint);
-            c.style.width = width; c.style.flexShrink = 0;
-            parent.Add(c);
+            var c = new VisualElement(); c.AddToClassList("col"); if (last) c.AddToClassList("col-last");
+            if (width > 0) { c.style.width = width; c.style.flexShrink = 0; } else { c.style.flexGrow = 1; c.style.flexBasis = 0; }
+            drawerContent.Add(c);
             return c;
         }
 
-        void DrawStructural()
+        ScrollView ColumnList(VisualElement col, string title, string aside = null)
         {
-            var row = HRow();
+            var h = new VisualElement(); h.AddToClassList("col-head");
+            h.Add(L(title, "h3"));
+            if (aside != null) h.Add(L(aside, "tiny"));
+            col.Add(h);
+            var sv = new ScrollView(ScrollViewMode.Vertical); sv.style.flexGrow = 1;
+            col.Add(sv);
+            return sv;
+        }
+
+        void DrawStructure()
+        {
             var s = net.Summary(selectedBp);
             var b = net.Blueprint(selectedBp);
-            var left = FixedCard(row, 270, "card-tint-violet");
-            left.Add(Tiny("INTEGRITY SCORE"));
-            var score = new Label(s != null ? $"{s.IntegrityScore:0}" : "–"); score.AddToClassList("big-number");
-            score.style.color = s == null ? Palette.Muted : s.IntegrityScore >= 80 ? Palette.Ok : s.IntegrityScore >= 55 ? Palette.Watch : Palette.Critical;
-            left.Add(score);
-            left.Add(Bar(s != null ? (float)s.IntegrityScore / 100f : 0, score.style.color.value));
-            var chips = new VisualElement(); chips.AddToClassList("row"); chips.style.flexWrap = Wrap.Wrap; chips.style.marginTop = 8;
+            var left = Column(230);
+            left.Add(Eyebrow("INTEGRITY", 4));
+            left.Add(L(s != null ? $"{s.IntegrityScore:0}" : "—", "num-lg"));
+            left.Add(Bar(s != null ? (float)s.IntegrityScore / 100f : 0, s == null ? Palette.Muted : s.IntegrityScore >= 80 ? Palette.Ok : s.IntegrityScore >= 55 ? Palette.Watch : Palette.Critical));
             if (s != null)
             {
-                chips.Add(Chip($"{s.CriticalCount} critical", "pill-critical"));
-                chips.Add(Chip($"{s.WatchCount} watch", "pill-watch"));
-                chips.Add(Chip($"{s.OkCount} sound", "pill-ok"));
+                var t = L($"{s.CriticalCount} critical  ·  {s.WatchCount} to review  ·  {s.OkCount} sound", "small");
+                t.style.marginTop = 10; left.Add(t);
             }
-            left.Add(chips);
             if (b != null)
             {
-                left.Add(Small($"Framing: {b.FloorJoist} floors · {b.CeilingJoist} ceilings/roof"));
-                left.Add(Small($"Foundation: {b.Foundation}"));
-                left.Add(Small($"Roof: {b.RoofType}"));
+                var f = L($"Floors {b.FloorJoist}, ceilings {b.CeilingJoist}. {b.Foundation}. {b.RoofType}.", "tiny");
+                f.style.marginTop = 12; left.Add(f);
             }
-            var list = ListCard(row, "Findings — IRC 2021 / AWC span tables / expansive-soil rules", 1);
-            var findings = net.Findings(selectedBp).OrderByDescending(f => f.Severity == "critical" ? 2 : f.Severity == "watch" ? 1 : 0).ThenByDescending(f => f.FixCost).ToList();
-            foreach (var f in findings)
+
+            var list = ColumnList(Column(0, true), "Findings", "IRC 2021  ·  AWC span tables");
+            foreach (var f in net.Findings(selectedBp).OrderByDescending(f => f.Severity == "critical" ? 2 : f.Severity == "watch" ? 1 : 0).ThenByDescending(f => f.FixCost))
             {
-                var r = new VisualElement(); r.AddToClassList("list-row");
-                var stripe = new VisualElement(); stripe.AddToClassList("sev-stripe"); stripe.style.backgroundColor = Palette.Severity(f.Severity); r.Add(stripe);
+                var r = new VisualElement(); r.AddToClassList("line"); r.style.alignItems = Align.FlexStart;
+                var dot = Dot("dot-" + f.Severity); dot.style.marginTop = 5; r.Add(dot);
                 var col = new VisualElement(); col.style.flexGrow = 1; col.style.flexShrink = 1;
-                var t = new Label(f.Title); t.AddToClassList("bold"); col.Add(t);
-                if (f.Severity != "ok") { var dd = new Label(f.Detail); dd.AddToClassList("small"); dd.AddToClassList("muted"); dd.AddToClassList("wrap"); col.Add(dd); }
+                col.Add(L(f.Title, "strong"));
+                if (f.Severity != "ok") col.Add(L(f.Detail, "small"));
                 r.Add(col);
-                var chipsCol = new VisualElement(); chipsCol.style.alignItems = Align.FlexEnd; chipsCol.style.width = 210;
-                var cr = new VisualElement(); cr.AddToClassList("row"); cr.style.justifyContent = Justify.FlexEnd; cr.style.flexWrap = Wrap.Wrap;
-                cr.Add(Chip(f.Severity.ToUpperInvariant(), f.Severity == "critical" ? "pill-critical" : f.Severity == "watch" ? "pill-watch" : "pill-ok"));
-                if (f.FixCost > 0) cr.Add(Chip("Fix " + Palette.Money(f.FixCost), "pill-violet"));
-                chipsCol.Add(cr);
-                var code = new Label(f.CodeRef); code.AddToClassList("tiny"); code.AddToClassList("muted"); chipsCol.Add(code);
+                var right = new VisualElement(); right.style.width = 200; right.style.alignItems = Align.FlexEnd;
+                right.Add(L(f.CodeRef, "tiny"));
+                if (f.FixCost > 0) right.Add(L($"Remedy approx. {Palette.Money(f.FixCost)}", "small"));
                 var rid = f.RoomId;
-                chipsCol.Add(Btn("Locate", () => FocusRoom(rid), "btn-small"));
-                r.Add(chipsCol);
+                right.Add(Btn("Show", () => FocusRoom(rid), "btn-text btn-sm"));
+                r.Add(right);
                 list.Add(r);
             }
         }
 
-        void DrawForecast()
+        void DrawSystems()
         {
-            var row = HRow();
-            var list = ListCard(row, "Building systems — 12-month failure probability (standalone vs. with cascade)", 1.6f);
             var comps = net.Components(selectedBp).ToDictionary(c => c.Id);
-            var openWo = new HashSet<uint>(net.WorkOrders(selectedBp).Where(w => w.Status != "done").Select(w => w.ComponentId));
+            var open = new HashSet<uint>(net.WorkOrders(selectedBp).Where(w => w.Status != "done").Select(w => w.ComponentId));
+            var list = ColumnList(Column(0), "Building systems", "Chance of failure within 12 months, alone and with upstream effects");
             foreach (var r in net.Risks(selectedBp))
             {
                 if (!comps.TryGetValue(r.ComponentId, out var c)) continue;
-                var line = new VisualElement(); line.AddToClassList("list-row");
-                var dot = new Label(Palette.KindIcon(c.Kind)); dot.style.width = 30; dot.style.height = 30; Round(dot, 15);
-                dot.style.backgroundColor = Palette.Tier(r.Tier); dot.style.color = Color.white; dot.style.unityTextAlign = TextAnchor.MiddleCenter; dot.style.unityFontStyleAndWeight = FontStyle.Bold; dot.style.fontSize = 10; dot.style.marginRight = 10;
-                line.Add(dot);
-                var name = new VisualElement(); name.style.width = 210;
-                var nl = new Label($"#{r.Rank} {c.Name}"); nl.AddToClassList("bold"); name.Add(nl);
-                var ml = new Label(c.Material); ml.AddToClassList("tiny"); ml.AddToClassList("muted"); ml.AddToClassList("wrap"); name.Add(ml);
+                var line = new VisualElement(); line.AddToClassList("line");
+                line.Add(Dot(TierDot(r.Tier)));
+                var name = new VisualElement(); name.style.width = 220;
+                name.Add(L(c.Name, "strong"));
+                name.Add(L(c.Material, "tiny"));
                 line.Add(name);
-                var bars = new VisualElement(); bars.style.flexGrow = 1; bars.style.marginRight = 12;
-                bars.Add(LabeledBar("alone", (float)r.BaseProb, Palette.Hex("#B6C2DD")));
-                bars.Add(LabeledBar("cascade", (float)r.CascadeProb, Palette.Tier(r.Tier)));
+                var bars = new VisualElement(); bars.style.flexGrow = 1; bars.style.marginRight = 16;
+                bars.Add(BarRow("alone", (float)r.BaseProb, Palette.Hex("#C9C5BC")));
+                bars.Add(BarRow("with cascade", (float)r.CascadeProb, Palette.Tier(r.Tier)));
                 line.Add(bars);
                 var money = new VisualElement(); money.style.width = 150;
-                money.Add(Small($"Exp. loss {Palette.Money(r.ExpectedLoss)}"));
-                var pv = new Label($"Fix prevents {Palette.Money(r.PreventionValue)}"); pv.AddToClassList("small"); pv.AddToClassList("bold"); pv.style.color = Palette.Mint; money.Add(pv);
+                money.Add(L($"Expected loss {Palette.Money(r.ExpectedLoss)}", "small"));
+                money.Add(L($"Fixing avoids {Palette.Money(r.PreventionValue)}", "tiny"));
                 line.Add(money);
-                var sensor = new VisualElement(); sensor.style.width = 170;
-                var sc = c.SensorValue >= c.SensorCritical ? Palette.Critical : c.SensorValue >= c.SensorWarn ? Palette.Watch : Palette.Ok;
-                var s1 = new Label($"{c.SensorValue:0.#} {c.SensorUnit}"); s1.AddToClassList("bold"); s1.style.color = sc; sensor.Add(s1);
-                var s2 = new Label(c.SensorLabel); s2.AddToClassList("tiny"); s2.AddToClassList("muted"); sensor.Add(s2);
+                var sensor = new VisualElement(); sensor.style.width = 150;
+                var sv = L($"{c.SensorValue:0.#} {c.SensorUnit}", "strong");
+                sv.style.color = c.SensorValue >= c.SensorCritical ? Palette.Critical : c.SensorValue >= c.SensorWarn ? Palette.Watch : Palette.Ink;
+                sensor.Add(sv);
+                sensor.Add(L(c.SensorLabel, "tiny"));
                 line.Add(sensor);
                 var cid = c.Id;
-                if (openWo.Contains(c.Id)) line.Add(Chip("Work order open", "pill-info"));
-                else line.Add(Btn("Dispatch fix", () => { net.Conn.Reducers.CreateWorkOrder(cid, "Preventive repair / replacement"); Toast($"Work order dispatched for {c.Name}"); }, "btn-small btn-coral"));
+                if (open.Contains(c.Id)) { var o = L("Scheduled", "tiny"); o.style.width = 80; line.Add(o); }
+                else line.Add(Btn("Schedule", () => { net.Conn.Reducers.CreateWorkOrder(cid, "Preventive repair or replacement"); Toast($"Work order created for {c.Name.ToLowerInvariant()}"); }, "btn-sm"));
                 line.RegisterCallback<ClickEvent>(e => { if (e.target is Button) return; SelectComponent(cid); });
                 list.Add(line);
             }
-            var paths = ListCard(row, "Predicted cascade chains (noisy-OR failure graph)", 1, "card-tint-coral");
-            int i = 0;
+
+            var paths = ColumnList(Column(340, true), "How a failure would spread");
             foreach (var p in net.Paths(selectedBp))
             {
-                var r = new VisualElement(); r.style.marginBottom = 10;
-                var t = new Label($"{++i}. {p.Label}"); t.AddToClassList("bold"); t.AddToClassList("wrap"); t.style.color = i == 1 ? Palette.Hex("#E63950") : i == 2 ? Palette.Hex("#E8701A") : Palette.Ink;
-                r.Add(t);
-                var cr = new VisualElement(); cr.AddToClassList("row"); cr.style.marginTop = 3;
-                cr.Add(Chip($"P {p.Probability * 100:0.0}%", "pill-critical"));
-                cr.Add(Chip($"Downstream {Palette.Money(p.Loss)}", "pill-violet"));
-                r.Add(cr);
-                var m = new Label(p.Mechanism); m.AddToClassList("tiny"); m.AddToClassList("muted"); m.AddToClassList("wrap");
-                r.Add(m);
+                var r = new VisualElement(); r.style.marginBottom = 12;
+                var t = L(p.Label, "strong"); t.AddToClassList("wrap"); r.Add(t);
+                r.Add(L($"{p.Probability * 100:0.0}% likelihood  ·  {Palette.Money(p.Loss)} downstream", "small"));
+                r.Add(L(p.Mechanism, "tiny"));
                 paths.Add(r);
             }
         }
 
-        void DrawPricing()
+        void DrawValuation()
         {
-            var row = HRow();
             var v = net.Valuation(selectedBp);
             var b = net.Blueprint(selectedBp);
             if (v == null || b == null) return;
-            var main = FixedCard(row, 270, "card-tint-sky");
-            main.Add(Tiny(b.Stage == "existing" ? "RECOMMENDED LIST PRICE" : "PROJECTED COMPLETED VALUE"));
-            var price = new Label(Palette.MoneyFull(v.ListPrice)); price.AddToClassList("big-number"); price.style.color = Palette.Indigo; main.Add(price);
-            main.Add(Small($"Range {Palette.Money(v.LowPrice)} – {Palette.Money(v.HighPrice)}"));
-            main.Add(Small($"{Palette.MoneyFull(v.Ppsf)}/sqft · confidence {Palette.Pct(v.Confidence)}"));
-            main.Add(Small($"~{v.DaysOnMarket:0} days on market"));
-            main.Add(Small($"Annual carry (tax + insurance + risk): {Palette.Money(v.AnnualCarryCost)}"));
+            var left = Column(240);
+            left.Add(Eyebrow(b.Stage == "existing" ? "RECOMMENDED LIST PRICE" : "VALUE AT COMPLETION", 4));
+            left.Add(L(Palette.MoneyFull(v.ListPrice), "num"));
+            left.Add(L($"{Palette.Money(v.LowPrice)} – {Palette.Money(v.HighPrice)}  ·  {Palette.MoneyFull(v.Ppsf)} per sq ft", "small"));
+            var m = L($"About {v.DaysOnMarket:0} days on market. Carrying cost {Palette.Money(v.AnnualCarryCost)} a year.", "small"); m.style.marginTop = 10; left.Add(m);
             if (v.ValueUnlocked > 0)
             {
-                var u = new Label($"Fixing {Palette.Money(v.PreListingRepairCost)} of issues pre-listing unlocks {Palette.Money(v.ValueUnlocked)} net");
-                u.AddToClassList("small"); u.AddToClassList("bold"); u.AddToClassList("wrap"); u.style.color = Palette.Mint; u.style.marginTop = 8;
-                main.Add(u);
+                var u = L($"Completing {Palette.Money(v.PreListingRepairCost)} of repairs before listing recovers roughly {Palette.Money(v.ValueUnlocked)} more than it costs.", "small");
+                u.style.marginTop = 10; u.style.color = Palette.Accent; left.Add(u);
             }
 
-            var bridge = ListCard(row, "Price bridge — how the twin got there", 1);
+            var bridge = ColumnList(Column(0), "Price build-up");
             double adjBase = v.MarketBase * (1 + v.AgeAdj + v.LayoutAdj);
             double riskDrag = adjBase + v.FeaturePremium - v.ConditionDiscount - v.StructuralDiscount - v.ListPrice;
-            var items = new List<(string, double, Color)>
+            var rows = new List<(string, double)>
             {
-                ("Market base (sqft × local $/sqft)", v.MarketBase, Palette.Sky),
-                ($"Age / new-build ({v.AgeAdj * 100:+0.0;-0.0}%)", v.MarketBase * v.AgeAdj, v.AgeAdj >= 0 ? Palette.Ok : Palette.Watch),
-                ($"Bed/bath layout ({v.LayoutAdj * 100:+0.0;-0.0}%)", v.MarketBase * v.LayoutAdj, v.LayoutAdj >= 0 ? Palette.Ok : Palette.Watch),
-                ("Feature premium (local demand-weighted)", v.FeaturePremium, Palette.Mint),
-                ("Condition / inspection credits", -v.ConditionDiscount, Palette.Coral),
-                ("Structural defect discount", -v.StructuralDiscount, Palette.Critical),
-                ("Cascade-risk drag (12-mo expected loss)", -riskDrag, Palette.Pink),
-                ("= Recommended list", v.ListPrice, Palette.Indigo),
+                ("Local market (size × median price per sq ft)", v.MarketBase),
+                ("Age / new construction", v.MarketBase * v.AgeAdj),
+                ("Bedroom and bath count", v.MarketBase * v.LayoutAdj),
+                ("Features, weighted by local demand", v.FeaturePremium),
+                ("Expected inspection credits", -v.ConditionDiscount),
+                ("Structural defects", -v.StructuralDiscount),
+                ("Near-term failure risk", -riskDrag),
             };
-            double max = items.Max(x => Math.Abs(x.Item2));
-            foreach (var (label, val, col) in items)
+            double max = rows.Max(x => Math.Abs(x.Item2));
+            for (int i = 0; i < rows.Count; i++)
             {
-                var r = new VisualElement(); r.AddToClassList("row"); r.style.marginBottom = 5;
-                var l = new Label(label); l.AddToClassList("small"); l.style.width = 250; r.Add(l);
-                var barBg = new VisualElement(); barBg.style.flexGrow = 1; barBg.style.height = 14;
-                var fill = new VisualElement(); fill.style.height = 14; Round(fill, 4);
-                fill.style.width = Length.Percent((float)(Math.Abs(val) / Math.Max(1, max) * 100)); fill.style.backgroundColor = col;
-                barBg.Add(fill); r.Add(barBg);
-                var vl = new Label((val >= 0 ? (label.StartsWith("=") || label.StartsWith("Market") ? "" : "+") : "") + Palette.Money(val)); vl.AddToClassList("small"); vl.AddToClassList("bold"); vl.style.width = 80; vl.style.unityTextAlign = TextAnchor.MiddleRight;
+                var (label, val) = rows[i];
+                var r = new VisualElement(); r.AddToClassList("line");
+                var l = L(label, "small"); l.style.width = 260; r.Add(l);
+                var track = new VisualElement(); track.style.flexGrow = 1; track.style.height = 10;
+                var fill = new VisualElement(); fill.style.height = 10; Round(fill, 2);
+                fill.style.width = Length.Percent((float)(Math.Abs(val) / Math.Max(1, max) * 100));
+                fill.style.backgroundColor = val >= 0 ? Palette.Hex("#9DB5AA") : Palette.Hex("#D7A99A");
+                track.Add(fill); r.Add(track);
+                var vl = L((val > 0 && i > 0 ? "+" : "") + Palette.Money(val), "small"); vl.AddToClassList("right"); vl.style.width = 80; vl.style.color = Palette.Ink;
                 r.Add(vl);
                 bridge.Add(r);
             }
+            var total = new VisualElement(); total.AddToClassList("line");
+            var tl = L("Recommended", "strong"); tl.style.flexGrow = 1; total.Add(tl);
+            total.Add(L(Palette.Money(v.ListPrice), "strong"));
+            bridge.Add(total);
 
-            var loc = ListCard(row, "Same model, different market", 1, "card-tint-mint");
-            var lp = net.LocationPricing(selectedBp);
-            double lmax = lp.Count > 0 ? lp.Max(x => x.ListPrice) : 1;
-            foreach (var p in lp)
+            var locs = ColumnList(Column(320, true), "The same house elsewhere");
+            foreach (var p in net.LocationPricing(selectedBp))
             {
                 bool here = p.LocationId == b.LocationId;
-                var r = new VisualElement(); r.style.marginBottom = 6;
-                var top = new VisualElement(); top.AddToClassList("row");
-                var n = new Label((here ? "> " : "") + p.LocationName); n.AddToClassList("small"); n.AddToClassList("bold"); n.style.flexGrow = 1; if (here) n.style.color = Palette.Indigo;
-                top.Add(n);
-                var pr = new Label(Palette.Money(p.ListPrice)); pr.AddToClassList("small"); pr.AddToClassList("bold"); top.Add(pr);
-                r.Add(top);
-                r.Add(Bar((float)(p.ListPrice / lmax), here ? Palette.Indigo : Palette.Mint));
-                var meta = new Label($"{Palette.MoneyFull(p.Ppsf)}/sf · risk {Palette.Money(p.RiskLoss12Mo)}/yr · {p.DaysOnMarket:0} DOM · top hazard: {p.TopHazard}"); meta.AddToClassList("tiny"); meta.AddToClassList("muted");
-                r.Add(meta);
-                loc.Add(r);
+                var r = new VisualElement(); r.AddToClassList("line"); r.style.flexDirection = FlexDirection.Column; r.style.alignItems = Align.Stretch;
+                var t = new VisualElement(); t.AddToClassList("row");
+                var n = L(p.LocationName + (here ? "  (this site)" : ""), here ? "strong" : "small"); n.style.flexGrow = 1; t.Add(n);
+                t.Add(L(Palette.Money(p.ListPrice), "strong"));
+                r.Add(t);
+                r.Add(L($"{Palette.MoneyFull(p.Ppsf)}/sq ft  ·  {p.DaysOnMarket:0} days  ·  main hazard: {p.TopHazard.ToLowerInvariant()}", "tiny"));
+                locs.Add(r);
             }
         }
 
-        void DrawFeatures()
+        void DrawFit()
         {
-            var row = HRow();
-            var feats = ListCard(row, "What sells here — demand-weighted for the local buyer pool", 1.2f, "card-tint-sun");
+            var feats = ColumnList(Column(0), "What buyers here look for", "Weighted by local buyer demand");
             foreach (var f in net.Features(selectedBp))
             {
-                var r = new VisualElement(); r.AddToClassList("list-row");
-                var badge = new Label(f.Present ? "HAS" : "GAP"); badge.AddToClassList("chip"); badge.AddToClassList(f.Present ? "pill-ok" : "pill-watch"); badge.style.width = 44; badge.style.unityTextAlign = TextAnchor.MiddleCenter;
-                r.Add(badge);
+                var r = new VisualElement(); r.AddToClassList("line"); r.style.alignItems = Align.FlexStart;
+                var dot = Dot(f.Present ? "dot-ok" : "dot-muted"); dot.style.marginTop = 5; r.Add(dot);
                 var col = new VisualElement(); col.style.flexGrow = 1; col.style.flexShrink = 1;
-                var n = new Label(f.Name); n.AddToClassList("bold"); col.Add(n);
-                var pt = new Label(f.Pitch); pt.AddToClassList("tiny"); pt.AddToClassList("muted"); pt.AddToClassList("wrap"); col.Add(pt);
+                col.Add(L(f.Name + (f.Present ? "" : "  — not present"), "strong"));
+                col.Add(L(Regex.Replace(f.Pitch, @"^Missing — \d+% local demand\. ", ""), "tiny"));
                 r.Add(col);
                 var right = new VisualElement(); right.style.width = 150;
-                right.Add(LabeledBar("demand", (float)f.DemandScore, Palette.Sun));
-                var vi = new Label((f.Present ? "+" : "potential +") + Palette.Money(f.ValueImpact)); vi.AddToClassList("small"); vi.AddToClassList("bold"); vi.style.color = f.Present ? Palette.Ok : Palette.Muted;
+                right.Add(BarRow("demand", (float)f.DemandScore, Palette.Sand));
+                var vi = L((f.Present ? "Adds " : "Could add ") + Palette.Money(f.ValueImpact), "tiny"); vi.AddToClassList("right");
                 right.Add(vi);
                 r.Add(right);
                 feats.Add(r);
             }
-            var ups = ListCard(row, "Best ROI moves (repairs × Cost vs. Value 2024 × local demand)", 1);
+            var ups = ColumnList(Column(0, true), "Best return on spend", "Repairs, plus Cost vs. Value 2024 upgrades");
             foreach (var u in net.Upgrades(selectedBp).Take(12))
             {
-                var r = new VisualElement(); r.AddToClassList("list-row");
+                var r = new VisualElement(); r.AddToClassList("line"); r.style.alignItems = Align.FlexStart;
                 var col = new VisualElement(); col.style.flexGrow = 1; col.style.flexShrink = 1;
-                var n = new Label(u.Name); n.AddToClassList("bold"); col.Add(n);
-                var ra = new Label(u.Rationale); ra.AddToClassList("tiny"); ra.AddToClassList("muted"); ra.AddToClassList("wrap"); col.Add(ra);
+                col.Add(L(u.Name, "strong"));
+                col.Add(L(u.Rationale, "tiny"));
                 r.Add(col);
-                var right = new VisualElement(); right.style.width = 170; right.style.alignItems = Align.FlexEnd;
-                var roi = new Label($"{u.Roi:0.00}× ROI"); roi.AddToClassList("bold"); roi.style.color = u.Roi >= 1 ? Palette.Ok : Palette.Watch; right.Add(roi);
-                right.Add(Small($"Cost {Palette.Money(u.Cost)} → {Palette.Money(u.ValueAdd + u.RiskAvoided)}"));
-                right.Add(Chip(u.Kind == "repair" ? "Prevent cascade" : "Upgrade", u.Kind == "repair" ? "pill-critical" : "pill-info"));
+                var right = new VisualElement(); right.style.width = 150; right.style.alignItems = Align.FlexEnd;
+                var roi = L($"{u.Roi:0.0}× return", "strong"); roi.style.color = u.Roi >= 1 ? Palette.Accent : Palette.Ink2; right.Add(roi);
+                right.Add(L($"{Palette.Money(u.Cost)} → {Palette.Money(u.ValueAdd + u.RiskAvoided)}", "tiny"));
                 r.Add(right);
                 ups.Add(r);
             }
         }
 
-        void DrawExecute()
+        void DrawOrders()
         {
-            var row = HRow();
-            var wos = ListCard(row, "Work orders — executed transactionally in SpacetimeDB", 1.2f, "card-tint-mint");
-            var comps = net.Components(selectedBp).ToDictionary(c => c.Id);
+            var list = ColumnList(Column(0), "Work orders");
             var orders = net.WorkOrders(selectedBp);
-            if (orders.Count == 0) wos.Add(Small("No work orders yet. Ask the agent to “fix the top risk” or press Dispatch in the Failure forecast tab."));
+            if (orders.Count == 0) list.Add(L("None yet. Schedule one from Systems, or ask the advisor to take care of the top risk.", "small"));
             foreach (var w in orders)
             {
-                var r = new VisualElement(); r.AddToClassList("list-row");
+                var r = new VisualElement(); r.AddToClassList("line");
+                r.Add(Dot(w.Status == "done" ? "dot-ok" : w.Status == "in_progress" ? "dot-watch" : "dot-muted"));
                 var col = new VisualElement(); col.style.flexGrow = 1; col.style.flexShrink = 1;
-                var n = new Label($"#{w.Id} {w.Title}"); n.AddToClassList("bold"); n.AddToClassList("wrap"); col.Add(n);
-                col.Add(Small($"{(w.Source == "agent" ? "Dispatched by " : "Created by ")}{w.CreatedByName} · budget {Palette.Money(w.Cost)} · prevents ≈ {Palette.Money(w.LossAvoided)}"));
+                col.Add(L(w.Title, "strong"));
+                var by = w.Source == "agent" ? "Raised by the advisor" : $"Raised by {w.CreatedByName}";
+                col.Add(L($"{by}  ·  budget {Palette.Money(w.Cost)}  ·  avoids about {Palette.Money(w.LossAvoided)}", "tiny"));
                 r.Add(col);
-                var st = w.Status switch { "done" => ("Done", "pill-ok"), "in_progress" => ("In progress", "pill-watch"), _ => ("Dispatched", "pill-info") };
-                r.Add(Chip(st.Item1, st.Item2));
+                var st = L(w.Status == "done" ? "Complete" : w.Status == "in_progress" ? "In progress" : "Scheduled", "small"); st.style.width = 90; r.Add(st);
                 if (w.Status != "done")
                 {
                     var id = w.Id;
-                    r.Add(Btn(w.Status == "dispatched" ? "Start" : "Complete", () => net.Conn.Reducers.AdvanceWorkOrder(id), "btn-small btn-primary"));
+                    r.Add(Btn(w.Status == "dispatched" ? "Start" : "Mark complete", () => net.Conn.Reducers.AdvanceWorkOrder(id), "btn-sm"));
                 }
-                wos.Add(r);
+                list.Add(r);
             }
-            var al = ListCard(row, "Live alerts — sensor thresholds, NOAA hail, freeze events", 1, "card-tint-coral");
+            var al = ColumnList(Column(420, true), "Alerts");
             var alerts = net.Alerts(selectedBp);
-            if (alerts.Count == 0) al.Add(Small("Press “Simulate time” in the top bar to stream monthly wear, weather events and sensor drift."));
+            if (alerts.Count == 0) al.Add(L("Run the simulation to see monthly wear, weather events and sensor readings come through.", "small"));
             foreach (var a in alerts.Take(30))
             {
-                var r = new VisualElement(); r.AddToClassList("list-row");
-                r.Add(Chip(a.Level.ToUpperInvariant(), a.Level == "critical" ? "pill-critical" : a.Level == "warn" ? "pill-watch" : "pill-ok"));
-                var m = new Label(a.Message); m.AddToClassList("small"); m.AddToClassList("wrap"); m.style.flexShrink = 1; m.style.flexGrow = 1;
-                r.Add(m);
-                var mo = new Label($"+{a.SimMonth} mo"); mo.AddToClassList("tiny"); mo.AddToClassList("muted"); r.Add(mo);
+                var r = new VisualElement(); r.AddToClassList("line"); r.style.alignItems = Align.FlexStart;
+                var dot = Dot(a.Level == "critical" ? "dot-critical" : a.Level == "warn" ? "dot-watch" : "dot-ok"); dot.style.marginTop = 5; r.Add(dot);
+                var m = L(a.Message, "small"); m.style.flexGrow = 1; m.style.flexShrink = 1; r.Add(m);
+                r.Add(L($"+{a.SimMonth} mo", "tiny"));
                 al.Add(r);
             }
         }
 
         void DrawSources()
         {
-            var row = HRow();
-            var src = ListCard(row, "Research-backed data sources fused in the twin", 1.5f);
+            var src = ColumnList(Column(0), "Data sources");
             foreach (var d in net.Sources())
             {
-                var r = new VisualElement(); r.AddToClassList("list-row");
-                r.Add(Chip(d.Domain, d.Domain == "Market" ? "pill-ok" : d.Domain == "Structural" ? "pill-violet" : d.Domain == "Hazard" ? "pill-watch" : "pill-info"));
+                var r = new VisualElement(); r.AddToClassList("line"); r.style.alignItems = Align.FlexStart;
+                var dom = L(d.Domain, "tiny"); dom.style.width = 80; r.Add(dom);
                 var col = new VisualElement(); col.style.flexGrow = 1; col.style.flexShrink = 1;
-                var n = new Label(d.Name); n.AddToClassList("bold"); n.AddToClassList("wrap"); col.Add(n);
-                var u = new Label($"{d.Usage} · {d.Url}"); u.AddToClassList("tiny"); u.AddToClassList("muted"); u.AddToClassList("wrap"); col.Add(u);
+                var n = L(d.Name, "small"); n.style.color = Palette.Ink; col.Add(n);
+                col.Add(L($"{d.Usage}  ·  {d.Url}", "tiny"));
                 r.Add(col);
                 src.Add(r);
             }
-            var arch = FixedCard(row, 420, "card-tint-violet");
-            var h = new Label("How the twin is wired"); h.AddToClassList("h3"); arch.Add(h);
+            var how = Column(380, true);
+            var h = new VisualElement(); h.AddToClassList("col-head"); h.Add(L("How it fits together", "h3")); how.Add(h);
             foreach (var line in new[]
             {
-                "• Tables unify plans, systems, hazards & comps (one relational source of truth).",
-                "• Reducers recompute structure, risk & price transactionally on every change.",
-                "• Scheduled reducer simulates monthly wear, NOAA hail & freeze events.",
-                "• Procedure runs the Nemotron agent loop with outbound HTTP — tool calls hit the same transactions.",
-                "• Subscriptions stream every agent step, alert and teammate pose to all clients live.",
-                "• NVIDIA_API_KEY lives in the database environment; clients never see it.",
+                "Plans, system ages, hazard layers and comparable sales live in one SpacetimeDB database.",
+                "Every change re-scores structure, failure risk and price inside the same transaction.",
+                "A scheduled job advances time: wear, hail, freezes and sensor drift.",
+                "The advisor runs inside the database as a procedure that calls NVIDIA Nemotron; its tools read and write the same tables.",
+                "Everyone connected sees agent steps, alerts, work orders and each other in real time.",
             })
             {
-                var l = new Label(line); l.AddToClassList("small"); l.AddToClassList("wrap"); l.style.marginTop = 4; arch.Add(l);
+                var l = L(line, "small"); l.style.marginBottom = 8; how.Add(l);
             }
         }
 
-        // ───────────── Agent panel ─────────────
+        // ───────────────────────── Advisor ─────────────────────────
 
-        void BuildQuickPrompts()
+        void BuildSuggestions()
         {
-            quickRow.Clear();
+            suggestions.Clear();
             var prompts = role == "construction_manager"
-                ? new[] { "Full structural review", "What fails first during construction?", "Sequence the next 90 days to avoid weather damage", "Dispatch fixes for critical issues" }
-                : new[] { "Price this home for listing", "What features should I lead with?", "What should the seller fix before listing?", "Fix the top risk now", "How would this price in Austin vs Plano?" };
+                ? new[] { "Give me a structural review", "What is most likely to fail during the build?", "Plan the next 90 days around weather risk", "Schedule fixes for the critical items" }
+                : new[] { "What should this list for?", "What should the listing lead with?", "What should the seller fix first?", "Take care of the top risk" };
             foreach (var p in prompts)
             {
                 var text = p;
-                var c = new Button(() => Ask(text)) { text = p };
-                c.AddToClassList("chip"); c.AddToClassList("chip-btn"); c.AddToClassList("pill-violet");
-                quickRow.Add(c);
+                var b = new Button(() => Ask(text)) { text = p };
+                b.AddToClassList("suggestion");
+                suggestions.Add(b);
             }
         }
 
@@ -1013,87 +933,100 @@ namespace CbreTwin
             if (string.IsNullOrEmpty(prompt) || selectedBp == 0 || !net.Ready) return;
             promptField.value = "";
             agentBusy = true;
-            RefreshAgent();
+            RefreshAdvisor();
+            RefreshTourAdvisor();
             net.Conn.Procedures.AskAgent(selectedBp, prompt, (ctx, result) =>
             {
                 agentBusy = false;
-                if (!result.IsSuccess) Toast("Agent error: " + result.Error?.Message);
+                if (!result.IsSuccess) Toast("The advisor could not answer: " + result.Error?.Message);
                 net.DirtyFlags |= Dirty.Agent;
             });
         }
 
-        void RefreshAgent()
+        void RefreshAdvisor()
         {
-            chatScroll.style.display = agentTab == "chat" ? DisplayStyle.Flex : DisplayStyle.None;
-            traceScroll.style.display = agentTab == "trace" ? DisplayStyle.Flex : DisplayStyle.None;
-
+            threadScroll.style.display = showReasoning ? DisplayStyle.None : DisplayStyle.Flex;
+            stepsScroll.style.display = showReasoning ? DisplayStyle.Flex : DisplayStyle.None;
             var run = net.LatestRun(selectedBp);
-            agentModel.text = run == null
-                ? "Orchestrator + Structural · Operations · Market specialists"
-                : run.UsedLlm || run.Status == "running" ? $"Model: {run.Model}" : $"Mode: {run.Model}";
+            if (run != null)
+                advisorMode.text = run.Status == "running" ? $"Working  ·  {run.Model.Replace("nvidia/", "")}"
+                    : run.UsedLlm ? $"Answered by {run.Model.Replace("nvidia/", "")}"
+                    : "Answered with built-in rules (no NVIDIA key configured)";
 
             var msgs = net.Messages(selectedBp);
             if (msgs.Count != lastMessageCount)
             {
                 lastMessageCount = msgs.Count;
-                chatBox.Clear();
+                thread.Clear();
                 if (msgs.Count == 0)
                 {
-                    var hello = Bubble("Twin Agent", "orchestrator",
-                        role == "construction_manager"
-                            ? "Hi! I coordinate a Structural Engineer, an Operations/Failure-prediction agent and a Market agent over this live twin. Ask for a structural review, what will fail first, or tell me to dispatch fixes."
-                            : "Hi! I coordinate Structural, Operations and Market agents over this live twin. Ask me to price the home, find the selling points, or fix issues before they reach the buyer's inspection.", false);
-                    chatBox.Add(hello);
+                    var m = new VisualElement(); m.AddToClassList("msg");
+                    m.Add(L("ADVISOR", "msg-author"));
+                    m.Add(L(role == "construction_manager"
+                        ? "Ask about structure, what is likely to fail during the build, or how to sequence the work. Answers come from this property's live data, and I can schedule work orders."
+                        : "Ask what the house should list for, what to lead the listing with, or what to fix before an inspection. Answers come from this property's live data, and I can schedule work orders.", "msg-text"));
+                    thread.Add(m);
                 }
-                foreach (var m in msgs) chatBox.Add(Bubble(m.AuthorName, m.Agent, m.Content, m.Role == "user"));
-                chatScroll.schedule.Execute(() => chatScroll.scrollOffset = new Vector2(0, chatScroll.contentContainer.layout.height)).ExecuteLater(30);
+                foreach (var m in msgs) thread.Add(Message(m));
+                threadScroll.schedule.Execute(() => threadScroll.scrollOffset = new Vector2(0, threadScroll.contentContainer.layout.height)).ExecuteLater(30);
             }
 
-            // Trace (live steps)
-            traceBox.Clear();
+            steps.Clear();
             var runs = net.Ready ? net.Conn.Db.AgentRun.BlueprintId.Filter(selectedBp).OrderByDescending(r => r.Id).Take(3).ToList() : new List<AgentRun>();
-            if (runs.Count == 0) traceBox.Add(Small("Each run's plan, hand-offs, tool calls and executed actions stream here live from the agent_step table."));
+            if (runs.Count == 0) steps.Add(L("Each question's plan, hand-offs between agents, tool calls and actions appear here as they happen.", "small"));
             foreach (var r in runs)
             {
-                var hdr = new Label($"Run #{r.Id} · {r.RequesterName}: “{Truncate(r.Prompt, 70)}” · {r.Status}"); hdr.AddToClassList("small"); hdr.AddToClassList("bold"); hdr.AddToClassList("wrap"); hdr.style.marginBottom = 6; hdr.style.marginTop = 6;
-                traceBox.Add(hdr);
-                foreach (var s in net.Steps(r.Id))
+                var hdr = L($"“{Truncate(r.Prompt, 80)}”", "strong"); hdr.AddToClassList("wrap"); hdr.style.marginTop = 6; hdr.style.marginBottom = 8;
+                steps.Add(hdr);
+                var list = net.Steps(r.Id);
+                for (int i = 0; i < list.Count; i++)
                 {
+                    var s = list[i];
                     var st = new VisualElement(); st.AddToClassList("step");
-                    var d = new Label(s.Kind switch { "plan" => "P", "handoff" => "H", "tool_call" => "T", "tool_result" => "R", "action" => "!", "final" => "F", "error" => "x", _ => "·" });
-                    d.AddToClassList("step-dot"); d.style.backgroundColor = s.Kind == "action" ? Palette.Coral : s.Kind == "error" ? Palette.Critical : Palette.Agent(s.Agent);
-                    st.Add(d);
-                    var bd = new VisualElement(); bd.AddToClassList("step-body");
-                    var t = new Label($"{s.Title}"); t.AddToClassList("step-title"); bd.Add(t);
-                    if (!string.IsNullOrEmpty(s.Detail)) { var dt = new Label(Truncate(Clean(s.Detail), 420)); dt.AddToClassList("step-detail"); dt.enableRichText = false; bd.Add(dt); }
+                    var rail = new VisualElement(); rail.AddToClassList("step-rail");
+                    var dot = Dot("dot-muted"); dot.style.backgroundColor = s.Kind == "action" ? Palette.Clay : s.Kind == "error" ? Palette.Critical : Palette.Agent(s.Agent);
+                    rail.Add(dot);
+                    if (i < list.Count - 1) { var ln = new VisualElement(); ln.AddToClassList("step-line"); rail.Add(ln); }
+                    st.Add(rail);
+                    var bd = new VisualElement(); bd.style.flexGrow = 1; bd.style.flexShrink = 1;
+                    bd.Add(L($"{AgentName(s.Agent)}  ·  {StepTitle(s)}", "step-title"));
+                    if (!string.IsNullOrEmpty(s.Detail) && s.Kind != "final") { var dt = L(Truncate(Clean(s.Detail), 360), "step-detail"); dt.enableRichText = false; bd.Add(dt); }
                     st.Add(bd);
-                    traceBox.Add(st);
+                    steps.Add(st);
                 }
             }
 
-            // Thinking indicator
             bool running = agentBusy || (run != null && run.Status == "running");
-            thinking.style.display = running ? DisplayStyle.Flex : DisplayStyle.None;
-            thinking.Clear();
+            working.style.display = running ? DisplayStyle.Flex : DisplayStyle.None;
+            working.Clear();
             if (running)
             {
-                var dot = new VisualElement(); dot.style.width = 10; dot.style.height = 10; Round(dot, 5); dot.style.backgroundColor = Palette.NvidiaGreen; dot.style.marginRight = 8;
-                thinking.Add(dot);
+                var d = Dot("dot-ok"); d.style.backgroundColor = Palette.Accent; working.Add(d);
                 var last = run != null ? net.Steps(run.Id).LastOrDefault() : null;
-                var l = new Label(last != null ? $"{AgentName(last.Agent)}: {last.Title}…" : "Orchestrator is planning…"); l.AddToClassList("small"); l.AddToClassList("bold"); l.style.color = Palette.Hex("#3F7D00");
-                thinking.Add(l);
+                working.Add(L(last != null ? $"{AgentName(last.Agent)}: {StepTitle(last)}" : "Planning…", "small"));
             }
         }
 
-        VisualElement Bubble(string author, string agent, string text, bool user)
+        static string StepTitle(AgentStep s) => s.Kind switch
         {
-            var b = new VisualElement(); b.AddToClassList("bubble"); b.AddToClassList(user ? "bubble-user" : "bubble-agent");
-            var meta = new Label(user ? author : $"{author} · {AgentName(agent)}"); meta.AddToClassList("bubble-meta");
-            if (!user) meta.style.color = Palette.Agent(agent);
-            b.Add(meta);
-            var t = new Label(Clean(text)); t.AddToClassList("bubble-text"); t.enableRichText = false;
-            b.Add(t);
-            return b;
+            "handoff" => "asked for a specialist view",
+            "tool_result" => s.Title.Replace(" brief", " reported back"),
+            "tool_call" => $"called {s.Title.Replace("_", " ")}",
+            "action" => "scheduled a work order",
+            "final" => "answered",
+            "error" => "model unavailable, used built-in rules",
+            "plan" => "started",
+            _ => s.Title,
+        };
+
+        VisualElement Message(AgentMessage m)
+        {
+            var el = new VisualElement(); el.AddToClassList("msg");
+            if (m.Role == "user") el.AddToClassList("msg-user");
+            else el.Add(L("ADVISOR", "msg-author"));
+            var t = L(Clean(m.Content), "msg-text"); t.enableRichText = false;
+            el.Add(t);
+            return el;
         }
 
         static string Clean(string s)
@@ -1107,14 +1040,14 @@ namespace CbreTwin
 
         static string AgentName(string a) => a switch
         {
-            "structural" => "Structural Engineer",
+            "structural" => "Structural",
             "operations" => "Operations",
-            "market" => "Market & Valuation",
+            "market" => "Market",
             "user" => "You",
             _ => "Orchestrator",
         };
 
-        // ───────────── 3D overlays: system pills, room labels, teammates, pins ─────────────
+        // ───────────────────────── Model overlays ─────────────────────────
 
         void RebuildMarkers()
         {
@@ -1124,44 +1057,38 @@ namespace CbreTwin
             roomLabels.Clear();
             nameTags.Clear();
             pinEls.Clear();
-            if (selectedBp == 0 || !net.Ready) return;
+            if (selectedBp == 0 || !net.Ready || showcase) return;
 
             if (showLabels)
-            {
                 foreach (var r in builder.RoomsById.Values)
                 {
                     if (r.Floor > builder.MaxFloor) continue;
-                    var l = new Label(builder.PlanMode ? $"{r.Name.ToUpperInvariant()}\n{r.W:0}' × {r.D:0}'" : r.Name);
-                    l.AddToClassList("room-label");
+                    var l = L(builder.PlanMode ? $"{r.Name.ToUpperInvariant()}\n{r.W:0}' × {r.D:0}'" : r.Name, "room-label");
                     if (builder.PlanMode) l.AddToClassList("room-label--plan");
                     l.pickingMode = PickingMode.Ignore;
                     labelLayer.Add(l);
                     roomLabels.Add((l, r.Id));
                 }
-            }
             if (builder.ShowSystems)
-            {
                 foreach (var c in net.Components(selectedBp))
                 {
                     if (!builder.RoomsById.TryGetValue(c.RoomId, out var room) || room.Floor > builder.MaxFloor) continue;
                     var risk = net.Risk(c.Id);
-                    var col = Palette.Tier(risk?.Tier ?? "low");
-                    var m = new VisualElement(); m.AddToClassList("marker"); m.style.borderTopColor = m.style.borderBottomColor = m.style.borderLeftColor = m.style.borderRightColor = col;
-                    var dot = new Label(Palette.KindIcon(c.Kind)); dot.AddToClassList("marker-dot"); dot.style.backgroundColor = col; dot.style.width = 22; dot.style.height = 16; dot.style.fontSize = 8; dot.style.color = Color.white; dot.style.unityTextAlign = TextAnchor.MiddleCenter;
-                    m.Add(dot);
-                    m.Add(new Label($"{Palette.KindLabel(c.Kind)} {(risk != null ? risk.CascadeProb * 100 : 0):0}%"));
+                    var m = new VisualElement(); m.AddToClassList("marker");
+                    m.Add(Dot(TierDot(risk?.Tier ?? "low")));
+                    m.Add(new Label($"{Palette.KindLabel(c.Kind)}  {(risk != null ? risk.CascadeProb * 100 : 0):0}%"));
                     var id = c.Id;
                     m.RegisterCallback<ClickEvent>(_ => SelectComponent(id));
                     markerLayer.Add(m);
                     markerEls.Add((m, c.Id));
                 }
-            }
             foreach (var a in net.Annotations(selectedBp))
             {
-                var p = new Label($"{a.AuthorName}: {a.Text}"); p.AddToClassList("name-tag"); p.style.backgroundColor = Palette.Hex(a.Color);
+                var p = L($"{a.AuthorName}: {a.Text}", "pin");
+                p.style.borderLeftColor = Palette.Hex(a.Color);
                 var aid = a.Id;
                 p.RegisterCallback<ClickEvent>(_ => net.Conn.Reducers.DeleteAnnotation(aid));
-                p.tooltip = "Click to remove pin";
+                p.tooltip = "Click to remove";
                 markerLayer.Add(p);
                 pinEls.Add((p, new Vector3(a.X, a.Y, a.Z)));
             }
@@ -1169,15 +1096,20 @@ namespace CbreTwin
 
         void LateUpdate()
         {
-            if (appLayer == null || appLayer.style.display == DisplayStyle.None || root.panel == null) return;
+            if (root?.panel == null || rig == null) return;
             var cam = rig.Cam;
+            if (rig.Mode == ViewMode.Tour) { LateUpdateTour(cam); return; }
+            if (appLayer.style.display == DisplayStyle.None) return;
             foreach (var (el, id) in markerEls)
-                Place(el, builder.ComponentWorld.TryGetValue(id, out var w) ? w + Vector3.up * 0.35f : (Vector3?)null, cam);
+                Place(el, builder.ComponentWorld.TryGetValue(id, out var w) ? w + Vector3.up * 0.3f : (Vector3?)null, cam);
             foreach (var (el, id) in roomLabels)
-                Place(el, builder.RoomCenter.TryGetValue(id, out var w) ? w + Vector3.up * 0.2f : (Vector3?)null, cam);
+                Place(el, builder.RoomCenter.TryGetValue(id, out var w) ? w + Vector3.up * 0.15f : (Vector3?)null, cam);
             foreach (var (el, pos) in pinEls) Place(el, pos, cam);
+            PlaceTeammates(markerLayer, cam);
+        }
 
-            // Teammate name tags
+        void PlaceTeammates(VisualElement layer, Camera cam)
+        {
             var seen = new HashSet<string>();
             if (showTeammates)
             {
@@ -1186,10 +1118,11 @@ namespace CbreTwin
                     if (kv.Value.t == null) continue;
                     seen.Add(kv.Key);
                     kv.Value.t.gameObject.SetActive(true);
-                    if (!nameTags.TryGetValue(kv.Key, out var tag))
+                    if (!nameTags.TryGetValue(kv.Key, out var tag) || tag.parent != layer)
                     {
-                        tag = new Label(kv.Value.name); tag.AddToClassList("name-tag"); tag.style.backgroundColor = kv.Value.color; tag.pickingMode = PickingMode.Ignore;
-                        markerLayer.Add(tag);
+                        tag?.RemoveFromHierarchy();
+                        tag = L(kv.Value.name, "name-tag"); tag.style.backgroundColor = kv.Value.color; tag.pickingMode = PickingMode.Ignore;
+                        layer.Add(tag);
                         nameTags[kv.Key] = tag;
                     }
                     Place(tag, kv.Value.t.position + Vector3.up * 0.45f, cam);
@@ -1199,11 +1132,11 @@ namespace CbreTwin
             foreach (var k in nameTags.Keys.Where(k => !seen.Contains(k)).ToList()) { nameTags[k].RemoveFromHierarchy(); nameTags.Remove(k); }
         }
 
-        void Place(VisualElement el, Vector3? world, Camera cam)
+        void Place(VisualElement el, Vector3? world, Camera cam, float maxDist = 999f)
         {
-            if (world == null) { el.style.display = DisplayStyle.None; return; }
+            if (world == null || el.parent == null) { el.style.display = DisplayStyle.None; return; }
             var vp = cam.WorldToViewportPoint(world.Value);
-            if (vp.z < 0.1f || vp.x < -0.1f || vp.x > 1.1f || vp.y < -0.1f || vp.y > 1.1f) { el.style.display = DisplayStyle.None; return; }
+            if (vp.z < 0.1f || vp.z > maxDist || vp.x < -0.1f || vp.x > 1.1f || vp.y < -0.1f || vp.y > 1.1f) { el.style.display = DisplayStyle.None; return; }
             el.style.display = DisplayStyle.Flex;
             var p = RuntimePanelUtils.CameraTransformWorldToPanel(root.panel, world.Value, cam);
             var origin = el.parent.worldBound.position;
@@ -1211,10 +1144,16 @@ namespace CbreTwin
             el.style.top = p.y - origin.y;
         }
 
-        // ───────────── Selection & popovers ─────────────
+        // ───────────────────────── Selection ─────────────────────────
 
         void HandleWorldClick(Vector2 screen)
         {
+            if (rig.Mode == ViewMode.Tour)
+            {
+                UnityEngine.Cursor.lockState = CursorLockMode.Locked;
+                UnityEngine.Cursor.visible = false;
+                return;
+            }
             if (appLayer.style.display == DisplayStyle.None) return;
             var ray = rig.Cam.ScreenPointToRay(screen);
             if (Physics.Raycast(ray, out var hit, 500f))
@@ -1247,40 +1186,45 @@ namespace CbreTwin
             ShowComponentPopover(id);
         }
 
+        void ComponentDetail(VisualElement host, Component c, bool dark)
+        {
+            var r = net.Risk(c.Id);
+            string sub = dark ? "on-dark-2 small" : "small";
+            string tiny = dark ? "on-dark-3 tiny" : "tiny";
+            double age = (net.Sim?.BaseYear ?? 2026.8) + (net.Sim?.SimMonths ?? 0) / 12.0 - c.InstallYear;
+            host.Add(L(c.Material, sub));
+            host.Add(L($"{Math.Max(0, age):0.#} of {c.ExpectedLife:0} years  ·  condition {c.Condition * 100:0}%", sub));
+            var sv = L($"{c.SensorLabel}: {c.SensorValue:0.#} {c.SensorUnit}", sub);
+            if (c.SensorValue >= c.SensorWarn) sv.style.color = c.SensorValue >= c.SensorCritical ? (dark ? Palette.Hex("#E38A80") : Palette.Critical) : (dark ? Palette.Hex("#D9B060") : Palette.Watch);
+            host.Add(sv);
+            if (r != null)
+            {
+                var b = BarRow("12-mo risk", (float)r.CascadeProb, Palette.Tier(r.Tier), dark); b.style.marginTop = 8; host.Add(b);
+                host.Add(L($"Expected loss {Palette.Money(r.ExpectedLoss)}. Fixing now avoids about {Palette.Money(r.PreventionValue)} across connected systems.", sub));
+            }
+            if (!string.IsNullOrEmpty(c.HazardFlag)) { var hz = L(c.HazardFlag, tiny); hz.style.marginTop = 6; host.Add(hz); }
+        }
+
         void ShowComponentPopover(uint id)
         {
             var c = net.Conn.Db.Component.Id.Find(id);
             if (c == null) return;
-            var r = net.Risk(id);
             popover.Clear();
             popover.style.display = DisplayStyle.Flex;
             var head = new VisualElement(); head.AddToClassList("row");
-            var t = new Label(c.Name); t.AddToClassList("h3"); t.style.flexGrow = 1; head.Add(t);
-            head.Add(Btn("×", () => { popover.style.display = DisplayStyle.None; builder.SelectedComponent = 0; }, "btn-small btn-ghost"));
+            var t = L(c.Name, "h2"); t.style.flexGrow = 1; head.Add(t);
+            head.Add(Btn("Close", () => { popover.style.display = DisplayStyle.None; builder.SelectedComponent = 0; }, "btn-text btn-sm"));
             popover.Add(head);
-            popover.Add(Small(c.Material));
-            double age = (net.Sim?.BaseYear ?? 2026.8) + (net.Sim?.SimMonths ?? 0) / 12.0 - c.InstallYear;
-            var chips = new VisualElement(); chips.AddToClassList("row"); chips.style.flexWrap = Wrap.Wrap; chips.style.marginTop = 6;
-            chips.Add(Chip($"Age {Math.Max(0, age):0.#} / {c.ExpectedLife:0} yr", "pill-info"));
-            chips.Add(Chip($"Health {c.Condition * 100:0}%", c.Condition > 0.6 ? "pill-ok" : c.Condition > 0.4 ? "pill-watch" : "pill-critical"));
-            if (r != null) chips.Add(Chip(r.Tier.ToUpperInvariant() + " RISK", r.Tier == "low" ? "pill-ok" : r.Tier == "elevated" ? "pill-watch" : "pill-critical"));
-            popover.Add(chips);
-            var sc = c.SensorValue >= c.SensorCritical ? Palette.Critical : c.SensorValue >= c.SensorWarn ? Palette.Watch : Palette.Ok;
-            var sensor = new Label($"{c.SensorLabel}: {c.SensorValue:0.#} {c.SensorUnit}  (warn {c.SensorWarn}, critical {c.SensorCritical})"); sensor.AddToClassList("small"); sensor.AddToClassList("bold"); sensor.AddToClassList("wrap"); sensor.style.color = sc;
-            popover.Add(sensor);
-            if (r != null)
-            {
-                popover.Add(LabeledBar("alone", (float)r.BaseProb, Palette.Hex("#B6C2DD")));
-                popover.Add(LabeledBar("cascade", (float)r.CascadeProb, Palette.Tier(r.Tier)));
-                popover.Add(Small($"Expected 12-mo loss {Palette.Money(r.ExpectedLoss)} · fixing now prevents {Palette.Money(r.PreventionValue)} across the graph"));
-                var dr = new Label(r.Drivers); dr.AddToClassList("tiny"); dr.AddToClassList("muted"); dr.AddToClassList("wrap"); popover.Add(dr);
-            }
-            if (!string.IsNullOrEmpty(c.HazardFlag)) { var hz = new Label("Hazard: " + c.HazardFlag); hz.AddToClassList("small"); hz.AddToClassList("wrap"); hz.style.color = Palette.Critical; hz.style.marginTop = 4; popover.Add(hz); }
-            var actions = new VisualElement(); actions.AddToClassList("row"); actions.style.marginTop = 10;
+            ComponentDetail(popover, c, false);
+            var actions = new VisualElement(); actions.AddToClassList("row"); actions.style.marginTop = 12;
             bool open = net.WorkOrders(selectedBp).Any(w => w.ComponentId == id && w.Status != "done");
-            if (!open) actions.Add(Btn($"Dispatch fix · {Palette.Money(c.ReplaceCost)}", () => { net.Conn.Reducers.CreateWorkOrder(id, "Preventive repair / replacement"); Toast("Work order dispatched"); }, "btn-coral"));
-            else actions.Add(Chip("Work order open", "pill-info"));
-            actions.Add(Btn("Ask agent", () => Ask($"Explain the risk on the {c.Name.ToLowerInvariant()} and what happens downstream if we wait 12 months."), "btn-primary"));
+            if (!open)
+            {
+                var sb = Btn($"Schedule repair  ·  {Palette.Money(c.ReplaceCost)}", () => { net.Conn.Reducers.CreateWorkOrder(id, "Preventive repair or replacement"); Toast("Work order created"); }, "btn-solid");
+                sb.style.marginLeft = 0; actions.Add(sb);
+            }
+            else actions.Add(L("A work order is open", "small"));
+            actions.Add(Btn("Ask advisor", () => Ask($"Explain the risk on the {c.Name.ToLowerInvariant()} and what happens downstream if we wait 12 months."), null));
             popover.Add(actions);
         }
 
@@ -1291,27 +1235,28 @@ namespace CbreTwin
             popover.Clear();
             popover.style.display = DisplayStyle.Flex;
             var head = new VisualElement(); head.AddToClassList("row");
-            var t = new Label(r.Name); t.AddToClassList("h3"); t.style.flexGrow = 1; head.Add(t);
-            head.Add(Btn("×", () => popover.style.display = DisplayStyle.None, "btn-small btn-ghost"));
+            var t = L(r.Name, "h2"); t.style.flexGrow = 1; head.Add(t);
+            head.Add(Btn("Close", () => popover.style.display = DisplayStyle.None, "btn-text btn-sm"));
             popover.Add(head);
-            popover.Add(Small($"Level {r.Floor + 1} · {r.W:0.#}' × {r.D:0.#}' · {r.W * r.D:#,0} sf · {r.Ceiling:0}' ceiling · glazing {r.Glazing * 100:0}%"));
+            popover.Add(L($"Level {r.Floor + 1}  ·  {r.W:0.#}' × {r.D:0.#}'  ·  {r.W * r.D:#,0} sq ft  ·  {r.Ceiling:0}' ceiling", "small"));
             foreach (var f in net.Findings(selectedBp).Where(f => f.RoomId == roomId))
             {
-                var row = new VisualElement(); row.AddToClassList("list-row");
-                var stripe = new VisualElement(); stripe.AddToClassList("sev-stripe"); stripe.style.backgroundColor = Palette.Severity(f.Severity); row.Add(stripe);
+                var row = new VisualElement(); row.AddToClassList("line"); row.style.alignItems = Align.FlexStart;
+                var d = Dot("dot-" + f.Severity); d.style.marginTop = 5; row.Add(d);
                 var col = new VisualElement(); col.style.flexShrink = 1;
-                var ft = new Label(f.Title); ft.AddToClassList("small"); ft.AddToClassList("bold"); ft.AddToClassList("wrap"); col.Add(ft);
-                var fd = new Label($"{f.Detail} ({f.CodeRef})"); fd.AddToClassList("tiny"); fd.AddToClassList("muted"); fd.AddToClassList("wrap"); col.Add(fd);
+                col.Add(L(f.Title, "strong"));
+                if (f.Severity != "ok") col.Add(L($"{f.Detail} {f.CodeRef}.", "tiny"));
                 row.Add(col);
                 popover.Add(row);
             }
             foreach (var c in net.Components(selectedBp).Where(c => c.RoomId == roomId))
             {
                 var id = c.Id;
-                popover.Add(Btn($"{Palette.KindLabel(c.Kind)}: {c.Name}", () => SelectComponent(id), "btn-small"));
+                var b = Btn(c.Name, () => SelectComponent(id), "btn-text btn-sm"); b.style.alignSelf = Align.FlexStart; b.style.marginLeft = 0;
+                popover.Add(b);
             }
-            var pinRow = new VisualElement(); pinRow.AddToClassList("row"); pinRow.style.marginTop = 10;
-            var pinField = Input("Drop a shared note pin here…"); pinField.style.flexGrow = 1; pinField.style.marginRight = 6;
+            var pinRow = new VisualElement(); pinRow.AddToClassList("row"); pinRow.style.marginTop = 12;
+            var pinField = Field("Leave a note for the team"); pinField.style.flexGrow = 1;
             pinRow.Add(pinField);
             var p = point + Vector3.up * 1.2f;
             pinRow.Add(Btn("Pin", () =>
@@ -1319,25 +1264,382 @@ namespace CbreTwin
                 if (string.IsNullOrWhiteSpace(pinField.value)) return;
                 net.Conn.Reducers.AddAnnotation(selectedBp, p.x, p.y, p.z, pinField.value.Trim());
                 pinField.value = "";
-                Toast("Pin shared with everyone on this blueprint");
-            }, "btn-primary"));
+            }, null));
             popover.Add(pinRow);
-            popover.Add(Btn("Ask agent about this room", () => Ask($"Review the {r.Name} for structural issues and buyer appeal."), "btn-ghost"));
+            var tour = Btn("Walk through from here", () => EnterTour(roomId), "btn-solid"); tour.style.marginLeft = 0; tour.style.marginTop = 10;
+            popover.Add(tour);
         }
 
-        // ───────────── Small UI factory helpers ─────────────
+        // ───────────────────────── Immersive tour ─────────────────────────
+
+        VisualElement vignette, fade, reticle, gazeCard, gazeFill, captureHint, tourAdvisorBody, tourProgress, tourMarkers, tourAdvisor;
+        Label tourRoom, tourSub, tourNarrText, tourStep, gazeTitle, gazeSub;
+        Button autoBtn;
+        List<TourStop> stops = new();
+        int stopIndex;
+        bool autoTour;
+        float autoNextAt = -1;
+        float fadeAlpha, fadeTarget;
+        Action fadeAction;
+        uint gazeId;
+        float gazeDwell;
+        bool prevRoof;
+        int prevMaxFloor;
+        readonly List<(VisualElement el, uint id)> tourMarkerEls = new();
+        int tourMsgCount = -1;
+
+        void BuildTour()
+        {
+            tourLayer = new VisualElement(); tourLayer.AddToClassList("fill"); tourLayer.pickingMode = PickingMode.Ignore;
+            root.Add(tourLayer);
+
+            vignette = new VisualElement(); vignette.AddToClassList("fill"); vignette.pickingMode = PickingMode.Ignore;
+            vignette.style.backgroundImage = new StyleBackground(VignetteTexture());
+            vignette.style.backgroundSize = new StyleBackgroundSize(new BackgroundSize(BackgroundSizeType.Cover));
+            vignette.style.opacity = 0;
+            tourLayer.Add(vignette);
+
+            tourMarkers = new VisualElement(); tourMarkers.AddToClassList("fill"); tourMarkers.pickingMode = PickingMode.Ignore;
+            tourLayer.Add(tourMarkers);
+
+            reticle = new VisualElement(); reticle.AddToClassList("reticle"); reticle.pickingMode = PickingMode.Ignore;
+            tourLayer.Add(reticle);
+            var core = new VisualElement(); core.AddToClassList("reticle-core"); core.pickingMode = PickingMode.Ignore;
+            tourLayer.Add(core);
+
+            gazeCard = new VisualElement(); gazeCard.AddToClassList("gaze-card"); gazeCard.AddToClassList("glass"); gazeCard.pickingMode = PickingMode.Ignore;
+            gazeTitle = L("", "h3 on-dark");
+            gazeSub = L("", "small on-dark-2");
+            gazeFill = new VisualElement(); gazeFill.AddToClassList("gaze-fill");
+            gazeCard.Add(gazeTitle); gazeCard.Add(gazeSub); gazeCard.Add(gazeFill);
+            gazeCard.style.display = DisplayStyle.None;
+            tourLayer.Add(gazeCard);
+
+            captureHint = L("Click to look around", "capture-hint glass"); captureHint.pickingMode = PickingMode.Ignore;
+            tourLayer.Add(captureHint);
+
+            var tourTop = new VisualElement(); tourTop.AddToClassList("tour-top"); tourTop.AddToClassList("glass");
+            tourStep = L("", "eyebrow");
+            tourRoom = L("", "tour-room");
+            tourSub = L("", "tour-sub");
+            tourProgress = new VisualElement(); tourProgress.AddToClassList("tour-progress");
+            tourTop.Add(tourStep); tourTop.Add(tourRoom); tourTop.Add(tourSub); tourTop.Add(tourProgress);
+            tourLayer.Add(tourTop);
+
+            var hint = new VisualElement(); hint.AddToClassList("tour-hint"); hint.AddToClassList("glass");
+            hint.Add(L("CONTROLS", "eyebrow"));
+            foreach (var (k, t) in new[] { ("W A S D", "walk"), ("Mouse", "look (click to capture, Esc to release)"), ("Q / E", "turn 30°"), ("T", "teleport to where you're looking"), ("N / P", "next / previous room"), ("Space", "auto tour"), ("Click", "inspect what you're looking at"), ("X", "leave the walkthrough") })
+            {
+                var r = new VisualElement(); r.AddToClassList("row"); r.style.marginTop = 4;
+                r.Add(L(k, "kbd")); r.Add(L(t, "tour-hint-line"));
+                hint.Add(r);
+            }
+            tourLayer.Add(hint);
+
+            var narr = new VisualElement(); narr.AddToClassList("tour-narration"); narr.AddToClassList("glass");
+            narr.Add(L("ABOUT THIS ROOM", "eyebrow"));
+            tourNarrText = L("", "tour-narration-text"); tourNarrText.style.marginTop = 6; tourNarrText.enableRichText = false;
+            narr.Add(tourNarrText);
+            tourLayer.Add(narr);
+
+            var bar = new VisualElement(); bar.AddToClassList("tour-bar"); bar.AddToClassList("glass");
+            bar.Add(TourBtn("Exit", ExitTour));
+            bar.Add(Sep());
+            bar.Add(TourBtn("Previous", () => GoToStop(stopIndex - 1, true)));
+            autoBtn = TourBtn("Auto tour", ToggleAuto);
+            bar.Add(autoBtn);
+            var next = TourBtn("Next room", () => GoToStop(stopIndex + 1, false)); next.AddToClassList("tour-btn--primary");
+            bar.Add(next);
+            bar.Add(Sep());
+            bar.Add(TourBtn("Ask about this room", AskAboutRoom));
+            tourLayer.Add(bar);
+
+            tourAdvisor = new VisualElement(); tourAdvisor.AddToClassList("tour-advisor"); tourAdvisor.AddToClassList("glass");
+            tourAdvisor.Add(L("ADVISOR", "eyebrow"));
+            var sv = new ScrollView(ScrollViewMode.Vertical); sv.style.maxHeight = 300; sv.style.marginTop = 6;
+            tourAdvisorBody = sv.contentContainer;
+            tourAdvisor.Add(sv);
+            tourAdvisor.style.display = DisplayStyle.None;
+            tourLayer.Add(tourAdvisor);
+
+            fade = new VisualElement(); fade.AddToClassList("fill"); fade.pickingMode = PickingMode.Ignore;
+            fade.style.backgroundColor = new Color(0.08f, 0.08f, 0.09f, 1f);
+            fade.style.opacity = 0;
+            root.Add(fade);
+        }
+
+        Button TourBtn(string text, Action a)
+        {
+            var b = new Button(a) { text = text };
+            b.AddToClassList("tour-btn");
+            return b;
+        }
+
+        static VisualElement Sep() { var s = new VisualElement(); s.AddToClassList("tour-sep"); return s; }
+
+        void EnterTour() => EnterTour(0);
+
+        void EnterTour(uint fromRoom)
+        {
+            if (selectedBp == 0) return;
+            popover.style.display = DisplayStyle.None;
+            prevRoof = builder.ShowRoof;
+            prevMaxFloor = builder.MaxFloor;
+            builder.PlanMode = false;
+            builder.ShowRoof = true;          // ceilings make the interior read as a real space
+            builder.MaxFloor = 99;
+            builder.Build(selectedBp, animate: false);
+            rig.Cam.backgroundColor = Palette.Sky3D;
+            stops = TourPlanner.Plan(builder, net, selectedBp);
+            if (stops.Count == 0) { Toast("This plan has no walkable rooms yet."); RebuildScene(true); return; }
+            stopIndex = Mathf.Max(0, stops.FindIndex(s => s.RoomId == fromRoom));
+            var s0 = stops[stopIndex];
+            appLayer.style.display = DisplayStyle.None;
+            tourLayer.style.display = DisplayStyle.Flex;
+            toast.AddToClassList("toast--tour");
+            fadeAlpha = 1; fade.style.opacity = 1; fadeTarget = 0;
+            rig.EnterTour(s0.Stand, YawTo(s0.Stand, s0.LookAt));
+            autoTour = false;
+            UpdateAutoBtn();
+            BuildTourMarkers();
+            ShowStop(s0);
+            tourMsgCount = net.Messages(selectedBp).Count;
+            tourAdvisor.style.display = DisplayStyle.None;
+        }
+
+        void ExitTour()
+        {
+            rig.ExitTour();
+            rig.Mode = ViewMode.Orbit;
+            builder.ShowRoof = prevRoof;
+            builder.MaxFloor = prevMaxFloor;
+            tourLayer.style.display = DisplayStyle.None;
+            appLayer.style.display = DisplayStyle.Flex;
+            toast.RemoveFromClassList("toast--tour");
+            gazeId = 0;
+            RebuildScene(true);
+            RebuildViewSeg();
+            RebuildLevels();
+            RefreshHint();
+        }
+
+        static float YawTo(Vector3 from, Vector3 to)
+        {
+            var d = to - from; d.y = 0;
+            return d.sqrMagnitude < 0.0001f ? 0 : Mathf.Atan2(d.x, d.z) * Mathf.Rad2Deg;
+        }
+
+        void GoToStop(int i, bool jump)
+        {
+            if (stops.Count == 0) return;
+            i = Mathf.Clamp(i, 0, stops.Count - 1);
+            if (i == stopIndex && !jump)
+            {
+                if (i == stops.Count - 1) { Toast("That's the last room on the walkthrough."); autoTour = false; UpdateAutoBtn(); }
+                return;
+            }
+            stopIndex = i;
+            var s = stops[i];
+            ShowStop(s);
+            if (jump || s.Teleport)
+                FadeThen(() => { rig.Teleport(s.Stand); rig.FaceToward(s.LookAt); OnTourArrive(); });
+            else
+                rig.Guide(s.Route, s.LookAt);
+        }
+
+        void ShowStop(TourStop s)
+        {
+            tourStep.text = $"ROOM {stopIndex + 1} OF {stops.Count}";
+            tourRoom.text = s.Title;
+            tourSub.text = s.Subtitle;
+            tourNarrText.text = s.Narration;
+            tourProgress.Clear();
+            for (int k = 0; k < stops.Count; k++)
+            {
+                var t = new VisualElement(); t.AddToClassList("tour-tick");
+                if (k < stopIndex) t.AddToClassList("tour-tick--done");
+                if (k == stopIndex) t.AddToClassList("tour-tick--now");
+                if (k != stopIndex && stops[k].Severity == "critical") t.AddToClassList("tour-tick--critical");
+                tourProgress.Add(t);
+            }
+        }
+
+        void OnTourArrive()
+        {
+            if (autoTour) autoNextAt = Time.unscaledTime + 7f;
+        }
+
+        void ToggleAuto()
+        {
+            autoTour = !autoTour;
+            UpdateAutoBtn();
+            if (autoTour) GoToStop(stopIndex + 1, false);
+        }
+
+        void UpdateAutoBtn() => autoBtn.text = autoTour ? "Pause tour" : "Auto tour";
+
+        void AskAboutRoom()
+        {
+            if (stops.Count == 0) return;
+            var s = stops[stopIndex];
+            tourAdvisor.style.display = DisplayStyle.Flex;
+            tourMsgCount = net.Messages(selectedBp).Count;
+            Ask($"I'm standing in the {s.Title.ToLowerInvariant()}. What should I know about this room: structure, systems, and how buyers will see it?");
+        }
+
+        void RefreshTourAdvisor()
+        {
+            if (rig.Mode != ViewMode.Tour || tourAdvisor.style.display == DisplayStyle.None || tourMsgCount < 0) return;
+            var msgs = net.Messages(selectedBp);
+            var answer = msgs.Skip(tourMsgCount).LastOrDefault(m => m.Role != "user");
+            var run = net.LatestRun(selectedBp);
+            if (answer == null && !agentBusy && (run == null || run.Status != "running")) return; // showing a system card
+            tourAdvisorBody.Clear();
+            if (answer == null)
+            {
+                var last = run != null ? net.Steps(run.Id).LastOrDefault() : null;
+                tourAdvisorBody.Add(L(last != null ? $"{AgentName(last.Agent)}: {StepTitle(last)}…" : "Thinking…", "small on-dark-2"));
+            }
+            else
+            {
+                var t = L(Clean(answer.Content), "tour-narration-text"); t.enableRichText = false;
+                tourAdvisorBody.Add(t);
+            }
+            var close = TourBtn("Close", () => tourAdvisor.style.display = DisplayStyle.None);
+            close.style.alignSelf = Align.FlexEnd; close.style.marginTop = 6;
+            tourAdvisorBody.Add(close);
+        }
+
+        void BuildTourMarkers()
+        {
+            tourMarkers.Clear();
+            tourMarkerEls.Clear();
+            foreach (var c in net.Components(selectedBp))
+            {
+                var risk = net.Risk(c.Id);
+                var m = new VisualElement(); m.AddToClassList("marker"); m.pickingMode = PickingMode.Ignore;
+                m.Add(Dot(TierDot(risk?.Tier ?? "low")));
+                m.Add(new Label(Palette.KindLabel(c.Kind)));
+                tourMarkers.Add(m);
+                tourMarkerEls.Add((m, c.Id));
+            }
+        }
+
+        void UpdateTour()
+        {
+            var kb = Keyboard.current;
+            if (kb != null && !IsTyping)
+            {
+                if (kb.nKey.wasPressedThisFrame) GoToStop(stopIndex + 1, false);
+                if (kb.pKey.wasPressedThisFrame) GoToStop(stopIndex - 1, true);
+                if (kb.spaceKey.wasPressedThisFrame) ToggleAuto();
+                if (kb.xKey.wasPressedThisFrame) { ExitTour(); return; }
+            }
+            if (autoTour && autoNextAt > 0 && Time.unscaledTime >= autoNextAt)
+            {
+                autoNextAt = -1;
+                if (stopIndex < stops.Count - 1) GoToStop(stopIndex + 1, false);
+                else { autoTour = false; UpdateAutoBtn(); }
+            }
+            // Comfort vignette narrows the view while moving
+            float v = Mathf.Clamp01(rig.CurrentSpeed / 1.6f) * 0.7f;
+            vignette.style.opacity = Mathf.Lerp(vignette.resolvedStyle.opacity, v, 1f - Mathf.Exp(-6f * Time.unscaledDeltaTime));
+            captureHint.style.display = rig.PointerLocked || rig.Guided ? DisplayStyle.None : DisplayStyle.Flex;
+        }
+
+        void LateUpdateTour(Camera cam)
+        {
+            foreach (var (el, id) in tourMarkerEls)
+                Place(el, builder.ComponentWorld.TryGetValue(id, out var w) ? w : (Vector3?)null, cam, 6f);
+            PlaceTeammates(tourMarkers, cam);
+
+            // Gaze selection: the system nearest the reticle, within arm's reach of the room
+            uint best = 0; float bestD = 80f;
+            var center = new Vector2(Screen.width / 2f, Screen.height / 2f);
+            foreach (var kv in builder.ComponentWorld)
+            {
+                var sp = cam.WorldToScreenPoint(kv.Value);
+                if (sp.z < 0.2f || sp.z > 6f) continue;
+                var px = Vector2.Distance(new Vector2(sp.x, sp.y), center) * (1080f / Mathf.Max(1, Screen.height));
+                if (px < bestD) { bestD = px; best = kv.Key; }
+            }
+            if (best != gazeId) { gazeId = best; gazeDwell = 0; }
+            else if (gazeId != 0) gazeDwell += Time.unscaledDeltaTime;
+            reticle.EnableInClassList("reticle--hot", gazeId != 0);
+            if (gazeId == 0) { gazeCard.style.display = DisplayStyle.None; return; }
+            var c = net.Conn.Db.Component.Id.Find(gazeId);
+            if (c == null) return;
+            var r = net.Risk(gazeId);
+            gazeCard.style.display = DisplayStyle.Flex;
+            gazeTitle.text = c.Name;
+            gazeSub.text = gazeDwell > 0.6f && r != null
+                ? $"{c.SensorLabel} {c.SensorValue:0.#} {c.SensorUnit}  ·  {r.CascadeProb * 100:0}% risk in 12 months  ·  fixing avoids {Palette.Money(r.PreventionValue)}"
+                : $"{Palette.KindLabel(c.Kind)}  ·  keep looking for details, click to open";
+            gazeFill.style.width = Length.Percent(Mathf.Clamp01(gazeDwell / 0.6f) * 100);
+        }
+
+        void OnReticleSelect()
+        {
+            if (gazeId == 0) return;
+            var c = net.Conn.Db.Component.Id.Find(gazeId);
+            if (c == null) return;
+            tourMsgCount = -1; // card, not an advisor answer
+            tourAdvisor.style.display = DisplayStyle.Flex;
+            tourAdvisorBody.Clear();
+            tourAdvisorBody.Add(L(c.Name, "h3 on-dark"));
+            ComponentDetail(tourAdvisorBody, c, true);
+            var row = new VisualElement(); row.AddToClassList("row"); row.style.marginTop = 10;
+            var id = c.Id;
+            bool open = net.WorkOrders(selectedBp).Any(w => w.ComponentId == id && w.Status != "done");
+            if (!open) row.Add(TourBtn("Schedule repair", () => { net.Conn.Reducers.CreateWorkOrder(id, "Preventive repair or replacement"); Toast("Work order created"); }));
+            row.Add(TourBtn("Ask advisor", () => { tourMsgCount = net.Messages(selectedBp).Count; Ask($"Explain the risk on the {c.Name.ToLowerInvariant()} and what happens downstream if we wait 12 months."); }));
+            row.Add(TourBtn("Close", () => tourAdvisor.style.display = DisplayStyle.None));
+            tourAdvisorBody.Add(row);
+            tourAdvisorBody.Add(L("Press Esc to free the cursor and use these buttons.", "tiny on-dark-3"));
+        }
+
+        void FadeThen(Action a)
+        {
+            fadeAction = a;
+            fadeTarget = 1;
+        }
+
+        void UpdateFade()
+        {
+            if (fade == null) return;
+            fadeAlpha = Mathf.MoveTowards(fadeAlpha, fadeTarget, Time.unscaledDeltaTime / 0.18f);
+            fade.style.opacity = fadeAlpha;
+            fade.style.display = fadeAlpha > 0.001f ? DisplayStyle.Flex : DisplayStyle.None;
+            if (fadeTarget >= 1f && fadeAlpha >= 1f)
+            {
+                var a = fadeAction; fadeAction = null;
+                a?.Invoke();
+                fadeTarget = 0;
+            }
+        }
+
+        // ───────────────────────── Factories ─────────────────────────
+
+        static Label L(string text, string classes)
+        {
+            var l = new Label(text);
+            if (!string.IsNullOrEmpty(classes)) foreach (var c in classes.Split(' ')) l.AddToClassList(c);
+            return l;
+        }
+
+        static Label Eyebrow(string t, float marginBottom)
+        {
+            var l = L(t, "eyebrow"); l.style.marginBottom = marginBottom; return l;
+        }
 
         static VisualElement Spacer() { var s = new VisualElement(); s.style.flexGrow = 1; return s; }
 
-        static Label Section(string t) { var l = new Label(t); l.AddToClassList("section-title"); return l; }
-        static Label FieldLabel(string t) { var l = new Label(t); l.AddToClassList("field-label"); return l; }
-        static Label Tiny(string t) { var l = new Label(t); l.AddToClassList("kpi-label"); return l; }
-        static Label Small(string t) { var l = new Label(t); l.AddToClassList("small"); l.AddToClassList("wrap"); l.style.marginTop = 2; return l; }
-
-        static Label Chip(string t, string cls)
+        static VisualElement Dot(string cls)
         {
-            var l = new Label(t); l.AddToClassList("chip"); if (cls != null) l.AddToClassList(cls); return l;
+            var d = new VisualElement(); d.AddToClassList("dot"); d.AddToClassList(cls); return d;
         }
+
+        static string TierDot(string tier) => tier switch { "severe" => "dot-critical", "high" => "dot-critical", "elevated" => "dot-watch", _ => "dot-ok" };
 
         static Button Btn(string text, Action onClick, string classes)
         {
@@ -1347,10 +1649,10 @@ namespace CbreTwin
             return b;
         }
 
-        static TextField Input(string placeholder)
+        static TextField Field(string placeholder)
         {
             var t = new TextField();
-            t.AddToClassList("input");
+            t.AddToClassList("field");
             t.textEdition.placeholder = placeholder;
             t.textEdition.hidePlaceholderOnFocus = true;
             t.RegisterCallback<FocusInEvent>(_ => IsTyping = true);
@@ -1365,18 +1667,20 @@ namespace CbreTwin
 
         static VisualElement Bar(float v, Color c)
         {
-            var bg = new VisualElement(); bg.AddToClassList("bar-bg"); bg.style.marginTop = 4; bg.style.flexGrow = 0;
+            var bg = new VisualElement(); bg.AddToClassList("bar-track"); bg.style.marginTop = 8;
             var f = new VisualElement(); f.AddToClassList("bar-fill"); f.style.backgroundColor = c; f.style.width = Length.Percent(Mathf.Clamp01(v) * 100);
             bg.Add(f);
             return bg;
         }
 
-        static VisualElement LabeledBar(string label, float v, Color c)
+        static VisualElement BarRow(string label, float v, Color c, bool dark = false)
         {
-            var r = new VisualElement(); r.AddToClassList("row"); r.style.marginTop = 2;
-            var l = new Label(label); l.AddToClassList("tiny"); l.AddToClassList("muted"); l.style.width = 52; r.Add(l);
-            var b = Bar(v, c); b.style.flexGrow = 1; b.style.marginTop = 0; r.Add(b);
-            var p = new Label($"{v * 100:0}%"); p.AddToClassList("tiny"); p.AddToClassList("bold"); p.style.width = 36; p.style.unityTextAlign = TextAnchor.MiddleRight; r.Add(p);
+            var r = new VisualElement(); r.AddToClassList("row"); r.style.marginTop = 3;
+            var l = L(label, dark ? "on-dark-3" : "tiny"); l.style.width = 76; l.style.fontSize = 10; r.Add(l);
+            var b = Bar(v, c); b.style.flexGrow = 1; b.style.marginTop = 0;
+            if (dark) b.style.backgroundColor = new Color(1, 1, 1, 0.15f);
+            r.Add(b);
+            var p = L($"{v * 100:0}%", dark ? "on-dark-2" : "tiny"); p.style.width = 34; p.AddToClassList("right"); p.style.fontSize = 10; r.Add(p);
             return r;
         }
 
@@ -1401,10 +1705,10 @@ namespace CbreTwin
             return seg;
         }
 
-        VisualElement LayerToggle(string label, bool on, Action<bool> changed)
+        VisualElement Switch(string label, bool on, Action<bool> changed)
         {
-            var r = new VisualElement(); r.AddToClassList("layer-row");
-            var l = new Label(label); l.AddToClassList("small"); r.Add(l);
+            var r = new VisualElement(); r.AddToClassList("switch-row");
+            r.Add(L(label, "small"));
             var t = new Toggle { value = on };
             t.RegisterValueChangedCallback(e => changed(e.newValue));
             r.Add(t);
@@ -1413,11 +1717,10 @@ namespace CbreTwin
 
         void Toast(string msg)
         {
-            if (toast == null) return;
             toast.text = msg;
             toast.style.display = DisplayStyle.Flex;
             toast.BringToFront();
-            toastUntil = Time.unscaledTime + 3.5f;
+            toastUntil = Time.unscaledTime + 4f;
         }
 
         static string Initials(string n)
@@ -1426,25 +1729,21 @@ namespace CbreTwin
             return parts.Length >= 2 ? $"{parts[0][0]}{parts[1][0]}".ToUpperInvariant() : (n ?? "?").Substring(0, Math.Min(2, (n ?? "?").Length)).ToUpperInvariant();
         }
 
-        static string RoleName(string r) => r == "construction_manager" ? "Construction Manager" : "Real Estate Agent";
+        static string RoleName(string r) => r == "construction_manager" ? "Construction manager" : "Real estate agent";
         static string Truncate(string s, int n) => string.IsNullOrEmpty(s) || s.Length <= n ? s : s.Substring(0, n) + "…";
 
-        static Texture2D Gradient(Color[] stops)
+        static Texture2D VignetteTexture()
         {
-            const int W = 256, H = 144;
-            var tex = new Texture2D(W, H, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
-            var px = new Color[W * H];
-            for (int y = 0; y < H; y++)
-                for (int x = 0; x < W; x++)
+            const int S = 256;
+            var tex = new Texture2D(S, S, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp };
+            var px = new Color[S * S];
+            for (int y = 0; y < S; y++)
+                for (int x = 0; x < S; x++)
                 {
-                    float t = Mathf.Clamp01((x / (float)W) * 0.7f + (1 - y / (float)H) * 0.3f);
-                    float f = t * (stops.Length - 1);
-                    int i = Mathf.Min(stops.Length - 2, Mathf.FloorToInt(f));
-                    var c = Color.Lerp(stops[i], stops[i + 1], f - i);
-                    // soft radial highlight
-                    float dx = x / (float)W - 0.25f, dy = y / (float)H - 0.7f;
-                    c = Color.Lerp(c, Color.white, Mathf.Clamp01(0.25f - (dx * dx + dy * dy)) * 0.9f);
-                    px[y * W + x] = c;
+                    float dx = (x + 0.5f) / S - 0.5f, dy = (y + 0.5f) / S - 0.5f;
+                    float r = Mathf.Sqrt(dx * dx + dy * dy) / 0.7071f;
+                    float a = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.45f, 1f, r));
+                    px[y * S + x] = new Color(0.05f, 0.05f, 0.06f, a);
                 }
             tex.SetPixels(px);
             tex.Apply();

@@ -3,6 +3,10 @@ using UnityEngine;
 
 namespace CbreTwin
 {
+    /// <summary>
+    /// Restrained, architectural palette: warm paper neutrals, one deep green accent,
+    /// a clay secondary, and muted status colours.
+    /// </summary>
     public static class Palette
     {
         public static Color Hex(string hex)
@@ -10,35 +14,45 @@ namespace CbreTwin
             return ColorUtility.TryParseHtmlString(hex, out var c) ? c : Color.magenta;
         }
 
-        public static readonly Color Indigo = Hex("#5B5BFF");
-        public static readonly Color Coral = Hex("#FF7A59");
-        public static readonly Color Mint = Hex("#2EC4B6");
-        public static readonly Color Sun = Hex("#FFD166");
-        public static readonly Color Pink = Hex("#FF5DA2");
-        public static readonly Color Sky = Hex("#4DA3FF");
-        public static readonly Color Ink = Hex("#1F2A44");
-        public static readonly Color Muted = Hex("#6B7A99");
-        public static readonly Color NvidiaGreen = Hex("#76B900");
+        // Interface
+        public static readonly Color Paper = Hex("#F4F2EE");
+        public static readonly Color Surface = Hex("#FFFFFF");
+        public static readonly Color Line = Hex("#E4E0D8");
+        public static readonly Color Ink = Hex("#1B1C1E");
+        public static readonly Color Ink2 = Hex("#55585E");
+        public static readonly Color Muted = Hex("#8A8D93");
+        public static readonly Color Accent = Hex("#2F5D50");
+        public static readonly Color AccentSoft = Hex("#E3ECE8");
+        public static readonly Color Clay = Hex("#B9714A");
+        public static readonly Color Slate = Hex("#5F7391");
+        public static readonly Color Sand = Hex("#C8A96A");
 
-        public static readonly Color Ok = Hex("#34C47C");
-        public static readonly Color Watch = Hex("#FFB020");
-        public static readonly Color Critical = Hex("#FF4D5E");
+        // Status
+        public static readonly Color Ok = Hex("#3C7A57");
+        public static readonly Color Watch = Hex("#B7791F");
+        public static readonly Color Critical = Hex("#B4443A");
 
-        public static readonly Color Sky3D = Hex("#EAF3FF");
-        public static readonly Color Lawn = Hex("#CDEBC4");
-        public static readonly Color BlueprintBg = Hex("#1E4E8C");
-        public static readonly Color BlueprintLine = Hex("#DDEBFF");
+        // Scene
+        public static readonly Color Sky3D = Hex("#ECEDEA");
+        public static readonly Color Ground = Hex("#D9DFCF");
+        public static readonly Color PlanPaper = Hex("#F7F6F2");
+        public static readonly Color PlanInk = Hex("#2B2D31");
+        public static readonly Color WallInterior = Hex("#FAF9F6");
+        public static readonly Color WallExterior = Hex("#EFEBE4");
+        public static readonly Color Glass = Hex("#C4D8DF");
+        public static readonly Color Frame = Hex("#2E3034");
 
-        static readonly Dictionary<string, string> RoomColors = new()
+        static readonly Dictionary<string, string> FloorFinish = new()
         {
-            ["living"] = "#FFE3C2", ["kitchen"] = "#FFF1A8", ["dining"] = "#FFD3DE", ["bedroom"] = "#D4E6FF",
-            ["primary"] = "#C8D9FF", ["bath"] = "#C6F1EA", ["hall"] = "#F2ECE3", ["laundry"] = "#E5DEFA",
-            ["garage"] = "#DFE3EA", ["office"] = "#DDF4CC", ["game"] = "#FFD6F0", ["media"] = "#D9D3FF",
-            ["stair"] = "#ECE5DA", ["closet"] = "#EFE9E0", ["pantry"] = "#FBEBD2", ["mudroom"] = "#F0E7D8",
-            ["patio"] = "#E6DACA", ["deck"] = "#D8B896", ["pool"] = "#6EC6FF",
+            ["living"] = "#DCCBB2", ["dining"] = "#DCCBB2", ["bedroom"] = "#D9CDBB", ["primary"] = "#D6C6AE",
+            ["office"] = "#D9CDBB", ["game"] = "#D3C4AD", ["media"] = "#C9C1B6", ["hall"] = "#DCCBB2",
+            ["stair"] = "#CDBBA0", ["kitchen"] = "#E9E6E0", ["bath"] = "#ECEBE7", ["laundry"] = "#E6E3DD",
+            ["mudroom"] = "#E1DDD5", ["pantry"] = "#E6E3DD", ["closet"] = "#D9CDBB", ["garage"] = "#D3D2CE",
+            ["patio"] = "#D6D1C7", ["deck"] = "#B79C7E", ["pool"] = "#7FB3C4",
         };
 
-        public static Color Room(string kind) => RoomColors.TryGetValue(kind, out var h) ? Hex(h) : Hex("#EEEEEE");
+        /// <summary>Material finish for a room's floor (oak, tile, concrete…).</summary>
+        public static Color Floor(string kind) => FloorFinish.TryGetValue(kind, out var h) ? Hex(h) : Hex("#DDD6CA");
 
         public static Color Severity(string s) => s switch
         {
@@ -49,36 +63,19 @@ namespace CbreTwin
 
         public static Color Tier(string tier) => tier switch
         {
-            "severe" => Hex("#FF4D6D"),
-            "high" => Hex("#FF8C42"),
-            "elevated" => Hex("#FFC233"),
-            _ => Mint,
+            "severe" => Hex("#B4443A"),
+            "high" => Hex("#C2683A"),
+            "elevated" => Hex("#C49A3A"),
+            _ => Hex("#5E8C76"),
         };
 
         public static Color Agent(string agent) => agent switch
         {
-            "structural" => Hex("#FF7A59"),
-            "operations" => Hex("#FF5DA2"),
-            "market" => Hex("#2EC4B6"),
-            "user" => Indigo,
-            _ => NvidiaGreen,
-        };
-
-        public static string KindIcon(string kind) => kind switch
-        {
-            "roof" => "RF",
-            "gutters" => "DR",
-            "foundation" => "FD",
-            "plumbing" => "PL",
-            "sewer" => "SW",
-            "electrical" => "EL",
-            "hvac" => "HV",
-            "water_heater" => "WH",
-            "windows" => "WN",
-            "attic_insulation" => "IN",
-            "drywall" => "FN",
-            "mold" => "IA",
-            _ => "··",
+            "structural" => Clay,
+            "operations" => Hex("#8E5A7A"),
+            "market" => Slate,
+            "user" => Ink,
+            _ => Accent,
         };
 
         public static string KindLabel(string kind) => kind switch
@@ -94,7 +91,7 @@ namespace CbreTwin
             "windows" => "Windows",
             "attic_insulation" => "Insulation",
             "drywall" => "Finishes",
-            "mold" => "Mold / IAQ",
+            "mold" => "Air & moisture",
             _ => kind,
         };
 

@@ -46,15 +46,37 @@ namespace CbreTwin
         public const string DefaultServer = "http://127.0.0.1:3000";
         public const string DefaultDb = "cbre-twin";
 
+        /// <summary>Build-time defaults (Resources/keystone_config.json), used on headsets where nothing can be typed.</summary>
+        [Serializable]
+        public class AppConfig
+        {
+            public string server = DefaultServer;
+            public string database = DefaultDb;
+            public string witToken = "";
+            public string playerName = "";
+        }
+
+        static AppConfig config;
+        public static AppConfig Config
+        {
+            get
+            {
+                if (config != null) return config;
+                var asset = Resources.Load<TextAsset>("keystone_config");
+                config = asset != null ? JsonUtility.FromJson<AppConfig>(asset.text) ?? new AppConfig() : new AppConfig();
+                return config;
+            }
+        }
+
         public string ServerUrl
         {
-            get => PlayerPrefs.GetString("twin.server", DefaultServer);
+            get => PlayerPrefs.GetString("twin.server", string.IsNullOrEmpty(Config.server) ? DefaultServer : Config.server);
             set => PlayerPrefs.SetString("twin.server", value);
         }
 
         public string DbName
         {
-            get => PlayerPrefs.GetString("twin.db", DefaultDb);
+            get => PlayerPrefs.GetString("twin.db", string.IsNullOrEmpty(Config.database) ? DefaultDb : Config.database);
             set => PlayerPrefs.SetString("twin.db", value);
         }
 

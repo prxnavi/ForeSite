@@ -2,6 +2,7 @@
   "dependencies": {
     "com.clockworklabs.spacetimedbsdk": "https://github.com/clockworklabs/com.clockworklabs.spacetimedbsdk.git#v2.14.1",
     "com.coplaydev.unity-mcp": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity",
+    "com.meta.xr.sdk.core": "207.0.1",
     "com.meta.xr.sdk.voice": "85.0.1",
     "com.unity.ai.assistant": "2.21.0-pre.2",
     "com.unity.ai.inference": "2.6.1",
@@ -47,7 +48,9 @@
     "com.unity.modules.xr": "1.0.0",
     "com.unity.pipeline": "0.10.0-exp.1",
     "com.unity.render-pipelines.universal": "17.6.0",
-    "com.unity.ugui": "2.6.0"
+    "com.unity.ugui": "2.6.0",
+    "com.unity.xr.management": "4.6.1",
+    "com.unity.xr.oculus": "4.5.5"
   },
   "scopedRegistries": [
     {

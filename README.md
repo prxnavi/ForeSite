@@ -127,13 +127,54 @@ Choose **Walkthrough** in the top bar (or **Walk in** on any room). All four exa
 | Click | Inspect what's under the reticle |
 | X | Leave the walkthrough |
 
-The walkthrough is a desktop rendition of VR interaction patterns. It does not drive a headset (no OpenXR package is installed).
+On a Meta Quest the same walkthrough runs natively in the headset (see below).
 
 After you change the module schema, regenerate the bindings:
 
 ```bash
 cd SpacetimeServer && spacetime generate --lang csharp --out-dir ../Assets/Scripts/SpacetimeBindings --module-path spacetimedb --yes
 ```
+
+## Meta Quest
+
+The same project runs as a Quest app. When a headset is active at launch, `TwinBootstrap` skips the desktop UI and starts `QuestApp`, which uses the **Meta XR Core SDK** (`OVRCameraRig`, `OVRInput`), the **Oculus XR Plugin** and the **Meta Voice SDK**.
+
+### Build it
+
+1. In Unity Hub, add **Android Build Support** (with OpenJDK and Android SDK/NDK) to Unity 6000.6.8f1.
+2. Turn on developer mode on the Quest (Meta Horizon phone app → Devices → Developer Mode) and connect it by USB-C.
+3. In Unity: **Keystone → Quest → 1. Configure project for Meta Quest**. This switches to Android and sets IL2CPP ARM64, Vulkan and the Oculus XR loader.
+4. Point the headset at your database, either:
+   - **Keystone → Quest → 2. Point headset at this Mac (Wi-Fi)**, then run the server so the headset can reach it:
+
+     ```bash
+     spacetime start --listen-addr 0.0.0.0:3000
+     ```
+
+   - or **2b. Point headset at Maincloud**, after publishing there.
+5. To enable voice, save your Wit.ai token in the desktop app first (Ask the agent → Voice). The config step copies it into `Assets/Resources/keystone_config.json`.
+6. **Keystone → Quest → 3. Build and run on headset**.
+
+### In the headset
+
+- **Home picker:** a floating panel. Point and pull the right trigger, or say a home's name.
+- **Walking around:** the house is built around you at full scale, with ceilings. Walls block you and doorways let you through.
+
+| Control | Action |
+|---|---|
+| Left stick | Walk |
+| Right stick ← → | Snap turn 30° |
+| Right trigger | Click what you point at: panel buttons, a building system (opens its risk card with **Fix it** and **Ask**), or the floor (teleport) |
+| A / X | Next / previous room (fade teleport) |
+| B | Ask the agent about this room (the answer floats beside you) |
+| Hold left trigger | Talk: notes, "next room", "fix the roof", or questions |
+| Y / Menu | Back to the home picker |
+
+- **Wrist menu:** shows the room name with Next / Back / Ask / Homes buttons.
+- **Room cards:** a card appears at each room with its narration.
+- **Shared with desktop:** notes appear as pins, and teammates on desktop or another headset show up live.
+
+`Keystone.MetaXR` (the only code that touches Meta XR types) compiles only when `com.meta.xr.sdk.core` is installed, so the desktop app doesn't depend on it.
 
 ## Voice (Meta Voice SDK)
 

@@ -1,0 +1,25 @@
+{
+    "name": "Keystone.MetaXR",
+    "rootNamespace": "Keystone.XR",
+    "references": [
+        "Keystone.XRCore",
+        "Oculus.VR"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "KEYSTONE_META_XR"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.meta.xr.sdk.core",
+            "expression": "",
+            "define": "KEYSTONE_META_XR"
+        }
+    ],
+    "noEngineReferences": false
+}

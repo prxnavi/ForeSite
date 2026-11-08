@@ -49,6 +49,21 @@ namespace CbreTwin
             app.AddComponent<TwinConnection>();
             var builder = new GameObject("Twin Builder").AddComponent<BlueprintBuilder>();
             builder.transform.SetParent(app.transform, false);
+
+            // Meta Quest: a headset is rendering, so run the immersive app instead of the desktop UI.
+            if (Keystone.XR.XRHub.HeadsetActive)
+            {
+                cam.gameObject.SetActive(false);
+                var xr = Keystone.XR.XRHub.Rig;
+                var quest = app.AddComponent<QuestApp>();
+                quest.Init(builder, xr);
+                var vrPresence = new GameObject("Teammates").AddComponent<PresenceSync>();
+                vrPresence.transform.SetParent(app.transform, false);
+                vrPresence.Builder = builder;
+                vrPresence.PoseSource = () => xr.Head != null ? (xr.Head.position, xr.Head.eulerAngles.y) : (Vector3.zero, 0f);
+                return;
+            }
+
             var rig = app.AddComponent<CameraRig>();
             rig.Cam = cam;
             var presence = new GameObject("Teammates").AddComponent<PresenceSync>();

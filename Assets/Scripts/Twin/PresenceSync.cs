@@ -10,6 +10,8 @@ namespace CbreTwin
     public class PresenceSync : MonoBehaviour
     {
         public CameraRig Rig;
+        /// <summary>Optional pose override (the headset uses its head transform).</summary>
+        public System.Func<(Vector3 pos, float yaw)> PoseSource;
         public BlueprintBuilder Builder;
         public readonly Dictionary<string, (Transform t, string name, Color color)> Others = new();
 
@@ -22,18 +24,18 @@ namespace CbreTwin
 
         void Update()
         {
-            if (Net == null || !Net.Ready || Net.Me == null || Builder == null || Builder.BlueprintId == 0) return;
+            if (Net == null || !Net.Ready || Net.Me == null || Builder == null || Builder.BlueprintId == 0 || (Rig == null && PoseSource == null)) return;
             var bp = Builder.BlueprintId;
 
             if (Time.unscaledTime >= nextSend)
             {
                 nextSend = Time.unscaledTime + 0.2f;
-                var p = Rig.Position;
-                if ((p - lastSent).sqrMagnitude > 0.0025f || Mathf.Abs(Rig.Yaw - lastYaw) > 1f)
+                var (p, yaw) = PoseSource != null ? PoseSource() : (Rig.Position, Rig.Yaw);
+                if ((p - lastSent).sqrMagnitude > 0.0025f || Mathf.Abs(yaw - lastYaw) > 1f)
                 {
                     lastSent = p;
-                    lastYaw = Rig.Yaw;
-                    Net.Conn.Reducers.UpdatePresence(bp, p.x, p.y, p.z, Rig.Yaw);
+                    lastYaw = yaw;
+                    Net.Conn.Reducers.UpdatePresence(bp, p.x, p.y, p.z, yaw);
                 }
             }
 

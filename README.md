@@ -8,7 +8,7 @@ Team:
 Asritha Pinnamaneni,
 Sanjana Vipperla,
 Srihitha Peddibotla,
-Pranavi Sammidi,
+Pranavi Sammidi
 
 ![Inside the twin on a Meta Quest: the agent team's investigation and the manager's plan](docs/images/vr-headset.jpg)
 

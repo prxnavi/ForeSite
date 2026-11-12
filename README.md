@@ -5,10 +5,10 @@
 ForeSite is an AI-powered digital twin of a building that you can walk inside. Put on a Meta Quest 3S and you're standing in the building at full size. Eight NVIDIA Nemotron agents work alongside you: they predict cascading failures, price the damage, and carry out the fix before the disruption spreads.
 
 Team:
-Asritha Pinnamaneni
-Sanjana Vipperla
-Srihitha Peddibotla
-Pranavi Sammidi
+Asritha Pinnamaneni,
+Sanjana Vipperla,
+Srihitha Peddibotla,
+Pranavi Sammidi,
 
 ![Inside the twin on a Meta Quest: the agent team's investigation and the manager's plan](docs/images/vr-headset.jpg)
 

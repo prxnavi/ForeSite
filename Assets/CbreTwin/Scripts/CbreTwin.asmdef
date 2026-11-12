@@ -1,0 +1,19 @@
+{
+    "name": "CbreTwin",
+    "rootNamespace": "CbreTwin",
+    "references": [
+        "com.clockworklabs.spacetimedbsdk",
+        "Keystone.XRCore",
+        "Keystone.VoiceCore",
+        "Unity.InputSystem"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

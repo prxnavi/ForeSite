@@ -1,0 +1,30 @@
+{
+    "name": "Keystone.MetaVoice",
+    "rootNamespace": "Keystone.Voice",
+    "references": [
+        "Keystone.VoiceCore",
+        "Meta.WitAi",
+        "Meta.WitAi.Lib",
+        "Meta.Wit.Dictation",
+        "VoiceSDK.Dictation.Runtime",
+        "VoiceSDK.Runtime",
+        "AssistantCoreSDKRuntime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "KEYSTONE_META_VOICE"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.meta.xr.sdk.voice",
+            "expression": "",
+            "define": "KEYSTONE_META_VOICE"
+        }
+    ],
+    "noEngineReferences": false
+}
